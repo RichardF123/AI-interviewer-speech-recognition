@@ -125,6 +125,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
     )
 
     current_tts_task: Optional[asyncio.Task] = None
+    current_llm_task: Optional[asyncio.Task] = None
     aliyun_asr: Optional[AliyunRealtimeTranscriber] = None
     asr_event_task: Optional[asyncio.Task] = None
     asr_start_task: Optional[asyncio.Task] = None
@@ -132,11 +133,12 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
     audio_chunk_count = 0
     aliyun_audio_backlog: list[bytes] = []
     mimo_audio_chunks: list[bytes] = []
-    final_already_sent = False
+    last_final_text = ""
+    last_final_at = 0.0
     asr_unavailable_notified = False
 
     async def handle_final_transcript(final_text: str) -> None:
-        nonlocal current_tts_task, final_already_sent
+        nonlocal current_tts_task, last_final_text, last_final_at
 
         final_text = final_text.strip()
         if not is_candidate_text(final_text):
@@ -148,7 +150,8 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 )
             )
             return
-        if final_already_sent:
+        now = asyncio.get_running_loop().time()
+        if final_text == last_final_text and now - last_final_at < 1.5:
             await websocket.send_json(
                 event(
                     "guard.blocked",
@@ -157,7 +160,8 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 )
             )
             return
-        final_already_sent = True
+        last_final_text = final_text
+        last_final_at = now
 
         metrics = TurnMetrics()
         turn_id = f"t_{uuid4().hex[:8]}"
@@ -166,13 +170,20 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
 
         await websocket.send_json(event("llm.input", turn_id=turn_id, text=final_text))
         assistant_text = await mock_orchestrator.respond_to_final_transcript(final_text)
-        await websocket.send_json(event("assistant.text", turn_id=turn_id, text=assistant_text))
+        await websocket.send_json(event("assistant.text", turn_id=turn_id, text=assistant_text, provider="deepseek"))
 
         if current_tts_task and not current_tts_task.done():
             current_tts_task.cancel()
         current_tts_task = asyncio.create_task(
             run_tts_turn(websocket, session, turn_id, assistant_text, metrics)
         )
+
+    def schedule_final_transcript(final_text: str) -> None:
+        nonlocal current_llm_task
+
+        if current_llm_task and not current_llm_task.done():
+            current_llm_task.cancel()
+        current_llm_task = asyncio.create_task(handle_final_transcript(final_text))
 
     async def forward_asr_events() -> None:
         nonlocal latest_asr_text
@@ -185,7 +196,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 latest_asr_text = asr_event["text"]
             await websocket.send_json(asr_event)
             if asr_event.get("type") == "stt.final" and is_candidate_text(asr_event.get("text", "")):
-                await handle_final_transcript(asr_event.get("text", ""))
+                schedule_final_transcript(asr_event.get("text", ""))
 
     async def start_aliyun_asr_background() -> None:
         nonlocal aliyun_asr, asr_event_task
@@ -228,11 +239,6 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 continue
 
             if incoming.type == "audio.chunk":
-                if final_already_sent:
-                    final_already_sent = False
-                    latest_asr_text = ""
-                    audio_chunk_count = 0
-                    mimo_audio_chunks.clear()
                 codec = (incoming.format or {}).get("codec")
                 audio_chunk_count += 1
                 if session.stt_provider == "mimo" and codec == "pcm_s16le" and incoming.audio_base64:
@@ -321,7 +327,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                     if final_text and is_candidate_text(final_text):
                         stt_final = mock_stt.final_from_demo_answer(final_text)
                         await websocket.send_json(stt_final)
-                        await handle_final_transcript(stt_final["text"])
+                        schedule_final_transcript(stt_final["text"])
                     else:
                         await websocket.send_json(
                             event(
@@ -342,7 +348,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 if final_text:
                     stt_final = mock_stt.final_from_demo_answer(final_text)
                     await websocket.send_json(stt_final)
-                    await handle_final_transcript(stt_final["text"])
+                    schedule_final_transcript(stt_final["text"])
                 else:
                     await websocket.send_json(
                         event(
@@ -370,7 +376,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 await websocket.send_json(stt_final)
 
                 # 关键边界：只有 stt.final 的稳定文本进入 orchestrator；partial 不进入 LLM。
-                await handle_final_transcript(stt_final["text"])
+                schedule_final_transcript(stt_final["text"])
                 continue
 
             if incoming.type == "control.interrupt":
@@ -383,6 +389,8 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                         await current_tts_task
                     except asyncio.CancelledError:
                         pass
+                if current_llm_task and not current_llm_task.done():
+                    current_llm_task.cancel()
                 session.is_tts_playing = False
                 await websocket.send_json(
                     event(
@@ -406,6 +414,8 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 event("error", code="UNSUPPORTED_EVENT", message=f"不支持的事件类型: {incoming.type}")
             )
     except WebSocketDisconnect:
+        if current_llm_task and not current_llm_task.done():
+            current_llm_task.cancel()
         if current_tts_task and not current_tts_task.done():
             current_tts_task.cancel()
         if asr_start_task and not asr_start_task.done():
@@ -416,6 +426,8 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
             aliyun_asr.stop()
     except Exception as exc:
         await websocket.send_json(event("error", code="INTERNAL_ERROR", message=str(exc)))
+        if current_llm_task and not current_llm_task.done():
+            current_llm_task.cancel()
         if asr_start_task and not asr_start_task.done():
             asr_start_task.cancel()
         if asr_event_task and not asr_event_task.done():

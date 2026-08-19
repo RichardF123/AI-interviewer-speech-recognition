@@ -66,7 +66,21 @@ class MockInterviewOrchestrator:
     def _is_bad_empty_judgement(self, assistant_text: str, final_text: str) -> bool:
         if len(final_text.strip()) < 8:
             return False
-        bad_patterns = ("没有内容", "没有可判断", "回答似乎没有", "回答似乎不完整", "重新说明")
+        bad_patterns = (
+            "没有内容",
+            "没有可判断",
+            "回答似乎没有",
+            "回答似乎不完整",
+            "重新说明",
+            "没听清",
+            "再说一遍",
+            "请重说",
+            "没有收到",
+            "不好意思",
+            "抱歉",
+            "信号",
+            "杂音",
+        )
         return any(pattern in assistant_text for pattern in bad_patterns)
 
     def _call_deepseek(self, final_text: str) -> str:
@@ -79,6 +93,8 @@ class MockInterviewOrchestrator:
                         "你是一个实时语音交互承载型 AI 面试官。"
                         "你的职责是稳定承接电话式语音对话，而不是设计复杂面试题或评估专业能力。"
                         "当收到候选人的稳定语义输入后，用自然、简短、口语化的方式回应。"
+                        "必须明确承接候选人刚才说到的具体内容，至少复用一个候选人原文里的关键词。"
+                        "如果候选人原文是可读中文，不要说没听清、没收到、没有内容或请重说。"
                         "每次回复 1 到 3 句话，适合语音播报。"
                         "如果候选人表达不完整，可以自然提示：你可以继续说，我在听。"
                         "不要把系统事件、转写状态、静音提示或网络状态当作候选人回答。"
