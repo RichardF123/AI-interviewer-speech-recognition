@@ -46,6 +46,12 @@ interface SpeechRecognitionEventLike {
   }>;
 }
 
+interface AudioFormat {
+  codec: string;
+  sample_rate: number;
+  channels: number;
+}
+
 interface TranscriptItem {
   id: string;
   kind: "partial" | "final";
@@ -132,6 +138,9 @@ export function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioSeqRef = useRef(0);
   const activeTranscriptRef = useRef("");
   const submittedSpeechRef = useRef(false);
   const timers = useRef<number[]>([]);
@@ -161,6 +170,7 @@ export function App() {
     return () => {
       clearTimers();
       recognitionRef.current?.abort();
+      stopMediaRecorder();
       audioRef.current?.pause();
       wsRef.current?.close();
     };
@@ -178,6 +188,29 @@ export function App() {
 
   function addEvent(type: string, text: string) {
     setEvents((items) => [{ id: makeId("evt"), time: nowTime(), type, text }, ...items].slice(0, 6));
+  }
+
+  async function blobToBase64(blob: Blob) {
+    const buffer = await blob.arrayBuffer();
+    let binary = "";
+    const bytes = new Uint8Array(buffer);
+    bytes.forEach((byte) => {
+      binary += String.fromCharCode(byte);
+    });
+    return window.btoa(binary);
+  }
+
+  function sendAudioChunk(audioBase64: string, format: AudioFormat) {
+    if (runtimeMode !== "backend" || wsRef.current?.readyState !== WebSocket.OPEN) return;
+    audioSeqRef.current += 1;
+    wsRef.current.send(
+      JSON.stringify({
+        type: "audio.chunk",
+        seq: audioSeqRef.current,
+        format,
+        audio_base64: audioBase64
+      })
+    );
   }
 
   function updateActiveTranscript(text: string) {
@@ -353,8 +386,8 @@ export function App() {
 
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      addEvent("speech.unsupported", "当前浏览器不支持实时语音识别，已切回模拟回答。");
-      runLocalAnswerSimulation();
+      addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用真实麦克风音频流。");
+      void startAudioChunkStreaming();
       return;
     }
 
@@ -400,8 +433,9 @@ export function App() {
     };
 
     recognition.onerror = (event) => {
-      setIsRecording(false);
-      addEvent("speech.error", `实时语音识别失败：${event.error ?? "unknown"}`);
+      addEvent("speech.error", `浏览器文字识别失败：${event.error ?? "unknown"}，改用真实麦克风音频流。`);
+      recognition.abort();
+      void startAudioChunkStreaming();
     };
 
     recognition.onend = () => {
@@ -411,16 +445,76 @@ export function App() {
       }
     };
 
-    recognition.start();
+    try {
+      recognition.start();
+    } catch {
+      addEvent("speech.error", "浏览器语音识别未能启动，改用真实麦克风音频流。");
+      void startAudioChunkStreaming();
+    }
   }
 
   function stopLiveAnswer() {
     if (!isRecording) return;
     if (activeTranscriptRef.current.trim()) {
       submitFinalAnswer(activeTranscriptRef.current.trim());
+    } else if (mediaRecorderRef.current) {
+      submitFinalAnswer("候选人已经通过麦克风完成回答。当前浏览器只上传了音频流，阿里云实时 ASR 接入后这里会显示真实转写。");
     }
     recognitionRef.current?.stop();
+    stopMediaRecorder();
     setIsRecording(false);
+  }
+
+  async function startAudioChunkStreaming() {
+    if (!window.MediaRecorder) {
+      setIsRecording(false);
+      addEvent("audio.unsupported", "当前浏览器不支持 MediaRecorder，请使用 Chrome 或 Edge。");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      audioSeqRef.current = 0;
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
+      updateActiveTranscript("正在接收真实麦克风音频。请说话，点击“结束回答”后提交本轮回答。");
+      addEvent("audio.start", "真实麦克风音频流已启动。");
+
+      recorder.ondataavailable = (event) => {
+        if (!event.data.size) return;
+        void blobToBase64(event.data).then((audioBase64) => {
+          sendAudioChunk(audioBase64, {
+            codec: mimeType,
+            sample_rate: 48000,
+            channels: 1
+          });
+        });
+      };
+      recorder.onerror = () => {
+        setIsRecording(false);
+        addEvent("audio.error", "麦克风录音启动失败。");
+      };
+      recorder.start(700);
+      setIsRecording(true);
+      setMicState("granted");
+    } catch {
+      setIsRecording(false);
+      setMicState("simulated");
+      addEvent("audio.error", "无法打开麦克风，请检查浏览器权限。");
+    }
+  }
+
+  function stopMediaRecorder() {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+    mediaRecorderRef.current = null;
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
   }
 
   function submitFinalAnswer(text: string) {
@@ -488,6 +582,7 @@ export function App() {
   function interruptPlayback() {
     clearTimers();
     recognitionRef.current?.abort();
+    stopMediaRecorder();
     audioRef.current?.pause();
     setIsPlaying(false);
     setIsRecording(false);
@@ -503,6 +598,7 @@ export function App() {
   function endInterview() {
     clearTimers();
     recognitionRef.current?.abort();
+    stopMediaRecorder();
     audioRef.current?.pause();
     wsRef.current?.close();
     setSessionState("ended");
@@ -515,6 +611,7 @@ export function App() {
   function resetRuntime() {
     clearTimers();
     recognitionRef.current?.abort();
+    stopMediaRecorder();
     audioRef.current?.pause();
     wsRef.current?.close();
     setRuntimeMode("local");
@@ -576,25 +673,6 @@ export function App() {
         <StatusItem label="麦克风" value={micState === "granted" ? "已授权" : micState === "checking" ? "检查中" : micState === "simulated" ? "模拟" : "未检查"} />
       </section>
 
-      <section className="command-bar">
-        <button className="primary-button" type="button" onClick={startInterview} disabled={sessionState === "active" || sessionState === "connecting"}>
-          <Play size={18} />
-          开始面试
-        </button>
-        <button className="plain-button" type="button" onClick={isRecording ? stopLiveAnswer : startLiveAnswer} disabled={sessionState !== "active"}>
-          <Mic size={18} />
-          {isRecording ? "结束回答" : "实时回答"}
-        </button>
-        <button className="plain-button danger" type="button" onClick={interruptPlayback} disabled={!isPlaying && !isRecording}>
-          <CircleStop size={18} />
-          打断
-        </button>
-        <button className="plain-button" type="button" onClick={endInterview} disabled={sessionState !== "active"}>
-          <PhoneOff size={18} />
-          结束
-        </button>
-      </section>
-
       <section className="steps" aria-label="演示步骤">
         {steps.map((step, index) => (
           <article className={`step ${step.state}`} key={step.title}>
@@ -611,25 +689,44 @@ export function App() {
       <section className="workspace">
         <section className="main-panel">
           <div className="panel-title">
+            {isPlaying ? <Volume2 size={18} /> : <Bot size={18} />}
+            <span>{isPlaying ? "面试官正在播放" : "AI 面试官输出"}</span>
+          </div>
+          <div className={isPlaying ? "speech-box playing" : "speech-box"}>
+            {latestAssistant?.text || "点击“开始面试”后，面试官会先开场。候选人 final 文本生成后，这里会出现追问。"}
+          </div>
+          <p className="hint">输出区只展示面试官要说的话；真实 TTS 可用时会直接播放语音。</p>
+        </section>
+
+        <section className="main-panel input-panel">
+          <div className="panel-title">
             <MicStatus micState={micState} isRecording={isRecording} />
-            <span>{isRecording ? "正在听候选人回答" : "候选人回答区"}</span>
+            <span>{isRecording ? "正在听候选人回答" : "候选人语音输入"}</span>
           </div>
           <div className={isRecording ? "speech-box listening" : "speech-box"}>
-            {activeTranscript || finalTranscript?.text || "点击“实时回答”，允许麦克风权限后直接说话。这里会先显示实时字幕，结束后形成 final 文本。"}
+            {activeTranscript || finalTranscript?.text || "点击下方“实时回答”，允许麦克风权限后直接说话。这里会显示实时字幕或音频流状态。"}
           </div>
           <p className="hint">规则：partial 只展示给用户，final 才会进入 AI 面试官理解和追问。</p>
         </section>
+      </section>
 
-        <section className="main-panel">
-          <div className="panel-title">
-            {isPlaying ? <Volume2 size={18} /> : <Bot size={18} />}
-            <span>{isPlaying ? "面试官正在播放" : "AI 面试官回复"}</span>
-          </div>
-          <div className={isPlaying ? "speech-box playing" : "speech-box"}>
-            {latestAssistant?.text || "开始面试后，面试官会先开场。候选人 final 文本生成后，这里会出现追问。"}
-          </div>
-          <p className="hint">TTS 真实接入时会把这段文本清洗、断句，再送到语音合成服务。</p>
-        </section>
+      <section className="command-bar input-actions" aria-label="输入控制">
+        <button className="primary-button" type="button" onClick={startInterview} disabled={sessionState === "active" || sessionState === "connecting"}>
+          <Play size={18} />
+          开始面试
+        </button>
+        <button className="plain-button" type="button" onClick={isRecording ? stopLiveAnswer : startLiveAnswer} disabled={sessionState !== "active"}>
+          <Mic size={18} />
+          {isRecording ? "结束回答" : "实时回答"}
+        </button>
+        <button className="plain-button danger" type="button" onClick={interruptPlayback} disabled={!isPlaying && !isRecording}>
+          <CircleStop size={18} />
+          打断
+        </button>
+        <button className="plain-button" type="button" onClick={endInterview} disabled={sessionState !== "active"}>
+          <PhoneOff size={18} />
+          结束
+        </button>
       </section>
 
       <section className="bottom-grid">

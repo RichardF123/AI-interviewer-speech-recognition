@@ -231,7 +231,7 @@ button:disabled {
 
 .workspace {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -244,6 +244,16 @@ button:disabled {
 
 .main-panel {
   padding: 18px;
+}
+
+.input-panel {
+  background: #fbfcfa;
+}
+
+.input-actions {
+  justify-content: flex-end;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #d9ded7;
 }
 
 .panel-title {
@@ -260,7 +270,7 @@ button:disabled {
 }
 
 .speech-box {
-  min-height: 172px;
+  min-height: 154px;
   margin-top: 14px;
   padding: 18px;
   border: 1px solid #e1e5df;
@@ -269,6 +279,11 @@ button:disabled {
   background: #fafbf8;
   font-size: 17px;
   line-height: 1.75;
+}
+
+.workspace .main-panel:first-child .speech-box {
+  min-height: 190px;
+  font-size: 18px;
 }
 
 .speech-box.listening {
