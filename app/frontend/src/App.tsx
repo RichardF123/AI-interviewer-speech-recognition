@@ -128,6 +128,7 @@ export function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [activeTranscript, setActiveTranscript] = useState("");
   const [voiceStatus, setVoiceStatus] = useState("");
+  const [llmInput, setLlmInput] = useState("");
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
   const [events, setEvents] = useState<EventLog[]>([]);
@@ -477,6 +478,12 @@ export function App() {
       return;
     }
 
+    if (serverEvent.type === "llm.input") {
+      setLlmInput(serverEvent.text ?? "");
+      addEvent("llm.input", "候选人 final 文本已发送给大模型。");
+      return;
+    }
+
     if (serverEvent.type === "tts.audio") {
       setIsPlaying(serverEvent.status !== "tts_completed" && serverEvent.status !== "cancelled");
       if (serverEvent.audio_base64 && serverEvent.codec === "mp3") {
@@ -790,6 +797,7 @@ export function App() {
     if (submittedSpeechRef.current) return;
     submittedSpeechRef.current = true;
     spokenTranscriptRef.current = text;
+    setLlmInput(text);
     updateActiveTranscript("");
     setIsRecording(false);
     isRecordingRef.current = false;
@@ -900,6 +908,7 @@ export function App() {
     setIsPlaying(false);
     updateActiveTranscript("");
     updateVoiceStatus("");
+    setLlmInput("");
     setTranscripts([]);
     setAssistantMessages([]);
     setLatency({ stt: "-", llm: "-", tts: "-", total: "-", interrupt: "-" });
@@ -987,6 +996,7 @@ export function App() {
           <div className={isRecording ? "speech-box listening" : "speech-box"}>
             {activeTranscript || finalTranscript?.text || voiceStatus || "点击下方“实时回答”，允许麦克风权限后直接说话。这里只会显示候选人转写或识别状态。"}
           </div>
+          {llmInput && <p className="hint">发送给 LLM：{llmInput}</p>}
           <p className="hint">规则：partial 只展示给用户，final 才会进入 AI 面试官理解和追问。</p>
         </section>
       </section>

@@ -111,6 +111,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
         session.current_turn_id = turn_id
         session.interrupted_turn_ids.discard(turn_id)
 
+        await websocket.send_json(event("llm.input", turn_id=turn_id, text=final_text))
         assistant_text = await mock_orchestrator.respond_to_final_transcript(final_text)
         await websocket.send_json(event("assistant.text", turn_id=turn_id, text=assistant_text))
 
