@@ -45,7 +45,10 @@ class MockInterviewOrchestrator:
     async def respond_to_final_transcript(self, final_text: str) -> str:
         if settings.deepseek_api_key:
             try:
-                return await asyncio.to_thread(self._call_deepseek, final_text)
+                assistant_text = await asyncio.to_thread(self._call_deepseek, final_text)
+                if self._is_bad_empty_judgement(assistant_text, final_text):
+                    return self._local_interviewer_followup(final_text)
+                return assistant_text
             except Exception as exc:
                 # Demo must remain usable even when the external LLM is unavailable.
                 print(f"DeepSeek fallback: {exc}", flush=True)
@@ -65,6 +68,12 @@ class MockInterviewOrchestrator:
         if any(keyword in text for keyword in ("模型", "大模型", "LLM", "AI")):
             return "你提到了模型能力。我想追问一下：你会如何判断这个模型生成的追问是有效的，而不是只是在泛泛复述候选人的回答？"
         return f"我听到你刚才的回答重点是：{text[:60]}。我想继续追问一下，这件事里最难的技术取舍是什么，你最后为什么选择那个方案？"
+
+    def _is_bad_empty_judgement(self, assistant_text: str, final_text: str) -> bool:
+        if len(final_text.strip()) < 8:
+            return False
+        bad_patterns = ("没有内容", "没有可判断", "回答似乎没有", "回答似乎不完整", "重新说明")
+        return any(pattern in assistant_text for pattern in bad_patterns)
 
     def _call_deepseek(self, final_text: str) -> str:
         payload = {

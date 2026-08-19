@@ -106,7 +106,7 @@ interface ServerEvent {
   chunks?: number;
 }
 
-const apiBase = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
+const apiBase = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8011";
 const timelineTemplate: TimelineItem[] = [
   { key: "mic_start", label: "mic_start" },
   { key: "first_audio_chunk", label: "first_audio_chunk" },
@@ -122,9 +122,6 @@ const systemStatusPatterns = [
   "正在上传音频",
   "检测到你在说话",
   "本轮语音已提交",
-  "麦克风",
-  "ASR",
-  "实时识别",
   "浏览器语音识别"
 ];
 
@@ -159,7 +156,7 @@ export function App() {
   const [micState, setMicState] = useState<MicState>("unknown");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("local");
   const [sessionId, setSessionId] = useState("-");
-  const [providerInfo, setProviderInfo] = useState("aliyun STT / deepseek LLM / aliyun TTS");
+  const [providerInfo, setProviderInfo] = useState("mimo STT / deepseek LLM / aliyun TTS");
   const [isRecording, setIsRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [activeTranscript, setActiveTranscript] = useState("");
@@ -197,6 +194,8 @@ export function App() {
   const spokenTranscriptRef = useRef("");
   const submittedSpeechRef = useRef(false);
   const pendingAutoRecordRef = useRef(false);
+  const pendingTtsTextRef = useRef("");
+  const browserTtsFallbackUsedRef = useRef(false);
   const timelineStartAtRef = useRef<number | null>(null);
   const timers = useRef<number[]>([]);
 
@@ -423,7 +422,7 @@ export function App() {
           candidate_id: "demo_candidate",
           job_id: "ai_interviewer_demo",
           language: "zh-CN",
-          stt_provider: "aliyun",
+          stt_provider: "mimo",
           llm_provider: "deepseek",
           tts_provider: "aliyun",
           voice_profile: "professional_warm_female",
@@ -542,6 +541,8 @@ export function App() {
 
     if (serverEvent.type === "assistant.text") {
       markTimeline("llm_first_text", "backend");
+      pendingTtsTextRef.current = serverEvent.text ?? "";
+      browserTtsFallbackUsedRef.current = false;
       setAssistantMessages((items) => [...items, { id: makeId("msg"), text: serverEvent.text ?? "", time: nowTime() }]);
       addEvent("assistant.text", "AI 面试官生成追问。");
       return;
@@ -559,6 +560,13 @@ export function App() {
       setIsPlaying(serverEvent.status !== "tts_completed" && serverEvent.status !== "cancelled");
       if (serverEvent.audio_base64 && serverEvent.codec === "mp3") {
         playAudioBase64(serverEvent.audio_base64);
+      } else if (
+        (serverEvent.status === "provider_fallback" || serverEvent.codec === "mock") &&
+        pendingTtsTextRef.current &&
+        !browserTtsFallbackUsedRef.current
+      ) {
+        browserTtsFallbackUsedRef.current = true;
+        speakBrowserTts(pendingTtsTextRef.current);
       }
       addEvent("tts.audio", `TTS 状态：${serverEvent.status ?? "streaming"}`);
       return;
@@ -987,7 +995,7 @@ export function App() {
     wsRef.current?.close();
     setRuntimeMode("local");
     setSessionId("-");
-    setProviderInfo("aliyun STT / deepseek LLM / aliyun TTS");
+    setProviderInfo("mimo STT / deepseek LLM / aliyun TTS");
     setIsRecording(false);
     isRecordingRef.current = false;
     clearVoiceTimers();
@@ -999,11 +1007,15 @@ export function App() {
     setAssistantMessages([]);
     setLatency({ stt: "-", llm: "-", tts: "-", total: "-", interrupt: "-" });
     setEvents([]);
+    pendingTtsTextRef.current = "";
+    browserTtsFallbackUsedRef.current = false;
+    window.speechSynthesis?.cancel();
     resetTimeline();
   }
 
   function playAudioBase64(audioBase64: string) {
     audioRef.current?.pause();
+    window.speechSynthesis?.cancel();
     const audio = new Audio(`data:audio/mpeg;base64,${audioBase64}`);
     audioRef.current = audio;
     setIsPlaying(true);
@@ -1016,6 +1028,23 @@ export function App() {
       setIsPlaying(false);
       addEvent("tts.blocked", "浏览器阻止自动播放，请再次点击页面后重试。");
     });
+  }
+
+  function speakBrowserTts(text: string) {
+    if (!("speechSynthesis" in window) || !text.trim()) {
+      setIsPlaying(false);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "zh-CN";
+    utterance.rate = 0.96;
+    utterance.pitch = 1.02;
+    utterance.volume = 1;
+    utterance.onend = () => setIsPlaying(false);
+    utterance.onerror = () => setIsPlaying(false);
+    setIsPlaying(true);
+    window.speechSynthesis.speak(utterance);
   }
 
   function resetDemo() {

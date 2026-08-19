@@ -4,7 +4,8 @@ import hmac
 import json
 import time
 from typing import Optional
-from urllib.parse import quote, urlencode
+from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -37,30 +38,35 @@ class AliyunNlsClient:
         if not token or not settings.aliyun_nls_app_key:
             return None
 
-        payload = urlencode(
+        payload = json.dumps(
             {
                 "appkey": settings.aliyun_nls_app_key,
+                "token": token,
                 "text": text[:300],
                 "format": "mp3",
-                "sample_rate": "16000",
+                "sample_rate": 16000,
                 "voice": settings.aliyun_tts_voice,
-            }
+            },
+            ensure_ascii=False,
         ).encode("utf-8")
         request = Request(
-            "https://nls-gateway.cn-shanghai.aliyuncs.com/stream/v1/tts",
+            settings.aliyun_tts_endpoint,
             data=payload,
             headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "X-NLS-Token": token,
+                "Content-Type": "application/json",
             },
             method="POST",
         )
-        with urlopen(request, timeout=20) as response:
-            content_type = response.headers.get("Content-Type", "")
-            body = response.read()
-            if "audio" not in content_type:
-                raise RuntimeError(body.decode("utf-8", errors="ignore"))
-            return body
+        try:
+            with urlopen(request, timeout=20) as response:
+                content_type = response.headers.get("Content-Type", "")
+                body = response.read()
+                if "audio" not in content_type:
+                    raise RuntimeError(body.decode("utf-8", errors="replace"))
+                return body
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Aliyun TTS HTTP {exc.code}: {body[:500]}") from exc
 
     def _create_token(self) -> tuple[str, int]:
         params = {

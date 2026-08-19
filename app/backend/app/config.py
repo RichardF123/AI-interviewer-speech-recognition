@@ -19,7 +19,12 @@ class Settings(BaseSettings):
     aliyun_nls_app_key: str = ""
     aliyun_nls_token: str = ""
     aliyun_tts_voice: str = "zhixiaoxia"
-    aliyun_nls_endpoint: str = "wss://nls-gateway.cn-shanghai.aliyuncs.com/ws/v1"
+    aliyun_nls_endpoint: str = "wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1"
+    aliyun_tts_endpoint: str = "https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/tts"
+    mimo_api_key: str = ""
+    mimo_base_url: str = "https://api.xiaomimimo.com/v1"
+    mimo_asr_model: str = "mimo-v2.5-asr"
+    mimo_asr_language: str = "zh"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

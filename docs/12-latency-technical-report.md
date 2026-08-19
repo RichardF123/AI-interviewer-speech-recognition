@@ -21,7 +21,7 @@
 - 输出区在上方，候选人输入区在下方。
 - 支持开始面试、实时回答、结束回答、打断、重置。
 - 使用 Web Audio API 获取麦克风 PCM 音频。
-- 使用浏览器 SpeechRecognition 作为低延迟字幕源，阿里云 ASR 并行上传。
+- 使用浏览器 SpeechRecognition 作为低延迟字幕源，后端默认切换为 MiMo ASR 段式转写。
 - 增加低延迟麦克风活动反馈：检测到声音后 100-250ms 内显示输入状态。
 - 增加 `发送给 LLM` 调试行，展示真实进入大模型的候选人 final 文本。
 - 明确区分候选人转写和系统状态，系统状态不会再被当成候选人答复。
@@ -36,7 +36,8 @@
 - 接入 DeepSeek Chat Completions。
 - 接入阿里云 NLS Token 创建。
 - 接入阿里云 NLS TTS HTTP 调用。
-- 增加阿里云实时 ASR SDK 桥接 `AliyunRealtimeTranscriber`。
+- 增加阿里云实时 ASR SDK 桥接 `AliyunRealtimeTranscriber`，保留为可切换方案。
+- 新增 MiMo ASR `mimo-v2.5-asr` 接入：前端上传 PCM，后端在用户结束回答时封装为 WAV/base64 后调用 MiMo。
 - 增加 `llm.input` 事件，把进入 LLM 的 final 文本回传前端。
 - 禁止 ASR 无文本时触发 LLM，避免系统状态污染候选人回答。
 
@@ -75,8 +76,19 @@
 - Uvicorn
 - Pydantic
 - 阿里云 NLS Python SDK
+- MiMo Speech Recognition API
 - DeepSeek Chat Completions
 - WebSocket
+
+## 3.1 MiMo ASR 切换说明
+
+2026-08-19 已按最新要求把默认 ASR provider 从 `aliyun` 切到 `mimo`。
+
+- 官方文档：https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/Speech-Recognition
+- 模型：`mimo-v2.5-asr`
+- 输入：`wav` / `mp3` 音频，base64 或 Data URL。
+- 当前实现：浏览器采集 16kHz PCM，后端在 `audio.stop` 后封装为 WAV，再调用 MiMo `/v1/chat/completions`。
+- 能力边界：MiMo 当前文档示例是“整段音频转写”，不是麦克风音频流式上传，因此无法提供真正 ASR partial；2-3 秒目标依赖短回答、及时停止录音和接口响应速度。
 
 外部服务：
 

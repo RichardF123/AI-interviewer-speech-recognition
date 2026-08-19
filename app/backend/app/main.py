@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.aliyun_asr import AliyunRealtimeTranscriber
+from app.mimo_asr import MimoAsrError, mimo_asr
 from app.mock_services import TurnMetrics, mock_orchestrator, mock_stt, mock_tts
 from app.schemas import (
     CreateInterviewSessionRequest,
@@ -26,10 +27,10 @@ SYSTEM_STATUS_PATTERNS = (
     "正在上传音频",
     "检测到你在说话",
     "本轮语音已提交",
-    "麦克风",
-    "ASR",
-    "实时识别",
     "浏览器语音识别",
+    "audio_received",
+    "waiting_for_stop",
+    "asr_processing",
 )
 
 
@@ -65,6 +66,11 @@ async def provider_status() -> dict:
             "token_configured": bool(settings.aliyun_nls_token),
             "access_key_configured": bool(settings.aliyun_access_key_id and settings.aliyun_access_key_secret),
             "tts_voice": settings.aliyun_tts_voice,
+        },
+        "mimo": {
+            "configured": bool(settings.mimo_api_key),
+            "model": settings.mimo_asr_model,
+            "mode": "segment_wav_base64",
         },
     }
 
@@ -121,6 +127,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
     asr_event_task: Optional[asyncio.Task] = None
     latest_asr_text = ""
     audio_chunk_count = 0
+    mimo_audio_chunks: list[bytes] = []
     final_already_sent = False
 
     async def handle_final_transcript(final_text: str) -> None:
@@ -187,6 +194,16 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
         except Exception as exc:
             aliyun_asr = None
             await websocket.send_json(event("asr.fallback", provider="mock", reason=str(exc)))
+    elif session.stt_provider == "mimo":
+        await websocket.send_json(
+            event(
+                "asr.ready",
+                provider="mimo",
+                format="pcm_s16le",
+                sample_rate=16000,
+                mode="segment_wav_base64",
+            )
+        )
 
     try:
         while True:
@@ -202,8 +219,21 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                     final_already_sent = False
                     latest_asr_text = ""
                     audio_chunk_count = 0
+                    mimo_audio_chunks.clear()
                 codec = (incoming.format or {}).get("codec")
                 audio_chunk_count += 1
+                if session.stt_provider == "mimo" and codec == "pcm_s16le" and incoming.audio_base64:
+                    mimo_audio_chunks.append(base64.b64decode(incoming.audio_base64))
+                    if audio_chunk_count == 1 or audio_chunk_count % 20 == 0:
+                        await websocket.send_json(
+                            event(
+                                "audio.received",
+                                provider="mimo",
+                                chunks=audio_chunk_count,
+                                message="audio_received_waiting_for_stop",
+                            )
+                        )
+                    continue
                 if aliyun_asr and codec == "pcm_s16le" and incoming.audio_base64:
                     aliyun_asr.send_audio(base64.b64decode(incoming.audio_base64))
                     if audio_chunk_count == 1 or audio_chunk_count % 20 == 0:
@@ -220,6 +250,49 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 continue
 
             if incoming.type == "audio.stop":
+                if session.stt_provider == "mimo":
+                    pcm_data = b"".join(mimo_audio_chunks)
+                    mimo_audio_chunks.clear()
+                    latest_asr_text = ""
+                    audio_chunk_count = 0
+                    if not pcm_data:
+                        await websocket.send_json(
+                            event(
+                                "error",
+                                code="NO_AUDIO",
+                                message="no_microphone_audio_received",
+                            )
+                        )
+                        continue
+
+                    await websocket.send_json(event("asr.processing", provider="mimo"))
+                    try:
+                        final_text = await asyncio.to_thread(mimo_asr.transcribe_pcm, pcm_data, 16000, 1)
+                    except MimoAsrError as exc:
+                        await websocket.send_json(
+                            event(
+                                "error",
+                                code="MIMO_ASR_ERROR",
+                                message=str(exc),
+                            )
+                        )
+                        continue
+
+                    final_text = final_text.strip()
+                    if final_text and is_candidate_text(final_text):
+                        stt_final = mock_stt.final_from_demo_answer(final_text)
+                        await websocket.send_json(stt_final)
+                        await handle_final_transcript(stt_final["text"])
+                    else:
+                        await websocket.send_json(
+                            event(
+                                "error",
+                                code="NO_ASR_TEXT",
+                                message="mimo_asr_returned_empty_text",
+                            )
+                        )
+                    continue
+
                 if aliyun_asr:
                     try:
                         aliyun_asr.stop()
