@@ -127,10 +127,13 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
     current_tts_task: Optional[asyncio.Task] = None
     aliyun_asr: Optional[AliyunRealtimeTranscriber] = None
     asr_event_task: Optional[asyncio.Task] = None
+    asr_start_task: Optional[asyncio.Task] = None
     latest_asr_text = ""
     audio_chunk_count = 0
+    aliyun_audio_backlog: list[bytes] = []
     mimo_audio_chunks: list[bytes] = []
     final_already_sent = False
+    asr_unavailable_notified = False
 
     async def handle_final_transcript(final_text: str) -> None:
         nonlocal current_tts_task, final_already_sent
@@ -184,18 +187,26 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
             if asr_event.get("type") == "stt.final" and is_candidate_text(asr_event.get("text", "")):
                 await handle_final_transcript(asr_event.get("text", ""))
 
-    if session.stt_provider == "aliyun":
+    async def start_aliyun_asr_background() -> None:
+        nonlocal aliyun_asr, asr_event_task
+
         try:
-            aliyun_asr = AliyunRealtimeTranscriber(asyncio.get_running_loop())
-            if aliyun_asr.start():
+            transcriber = AliyunRealtimeTranscriber(asyncio.get_running_loop())
+            if await asyncio.to_thread(transcriber.start):
+                aliyun_asr = transcriber
                 asr_event_task = asyncio.create_task(forward_asr_events())
                 await websocket.send_json(event("asr.ready", provider="aliyun", format="pcm_s16le", sample_rate=16000))
+                for pcm_data in aliyun_audio_backlog:
+                    transcriber.send_audio(pcm_data)
+                aliyun_audio_backlog.clear()
             else:
-                aliyun_asr = None
-                await websocket.send_json(event("asr.fallback", provider="mock", reason="阿里云 ASR 未配置 token/appkey"))
+                await websocket.send_json(event("asr.fallback", provider="mock", reason="aliyun_asr_missing_token_or_appkey"))
         except Exception as exc:
-            aliyun_asr = None
             await websocket.send_json(event("asr.fallback", provider="mock", reason=str(exc)))
+
+    if session.stt_provider == "aliyun":
+        await websocket.send_json(event("asr.starting", provider="aliyun"))
+        asr_start_task = asyncio.create_task(start_aliyun_asr_background())
     elif session.stt_provider == "mimo":
         await websocket.send_json(
             event(
@@ -245,6 +256,32 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                                 provider="aliyun",
                                 chunks=audio_chunk_count,
                                 message="后端已收到真实麦克风音频，正在等待阿里云返回转写。",
+                            )
+                        )
+                    continue
+                if session.stt_provider == "aliyun":
+                    if codec == "pcm_s16le" and incoming.audio_base64 and asr_start_task and not asr_start_task.done():
+                        pcm_data = base64.b64decode(incoming.audio_base64)
+                        aliyun_audio_backlog.append(pcm_data)
+                        if len(aliyun_audio_backlog) > 160:
+                            aliyun_audio_backlog.pop(0)
+                        if audio_chunk_count == 1 or audio_chunk_count % 20 == 0:
+                            await websocket.send_json(
+                                event(
+                                    "audio.received",
+                                    provider="aliyun",
+                                    chunks=audio_chunk_count,
+                                    message="audio_buffered_waiting_for_realtime_asr",
+                                )
+                            )
+                        continue
+                    if not asr_unavailable_notified:
+                        asr_unavailable_notified = True
+                        await websocket.send_json(
+                            event(
+                                "error",
+                                code="ASR_STREAM_UNAVAILABLE",
+                                message="backend_realtime_asr_unavailable",
                             )
                         )
                     continue
@@ -371,12 +408,16 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
     except WebSocketDisconnect:
         if current_tts_task and not current_tts_task.done():
             current_tts_task.cancel()
+        if asr_start_task and not asr_start_task.done():
+            asr_start_task.cancel()
         if asr_event_task and not asr_event_task.done():
             asr_event_task.cancel()
         if aliyun_asr:
             aliyun_asr.stop()
     except Exception as exc:
         await websocket.send_json(event("error", code="INTERNAL_ERROR", message=str(exc)))
+        if asr_start_task and not asr_start_task.done():
+            asr_start_task.cancel()
         if asr_event_task and not asr_event_task.done():
             asr_event_task.cancel()
         if aliyun_asr:

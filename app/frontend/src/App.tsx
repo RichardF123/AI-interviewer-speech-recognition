@@ -97,6 +97,7 @@ interface ServerEvent {
   audio_base64?: string;
   message?: string;
   code?: string;
+  provider?: string;
   stt_final_latency_ms?: number;
   llm_first_token_ms?: number;
   tts_first_audio_ms?: number;
@@ -156,7 +157,7 @@ export function App() {
   const [micState, setMicState] = useState<MicState>("unknown");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("local");
   const [sessionId, setSessionId] = useState("-");
-  const [providerInfo, setProviderInfo] = useState("mimo STT / deepseek LLM / aliyun TTS");
+  const [providerInfo, setProviderInfo] = useState("aliyun STT / deepseek LLM / aliyun TTS");
   const [isRecording, setIsRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [activeTranscript, setActiveTranscript] = useState("");
@@ -423,7 +424,7 @@ export function App() {
           candidate_id: "demo_candidate",
           job_id: "ai_interviewer_demo",
           language: "zh-CN",
-          stt_provider: "mimo",
+          stt_provider: "aliyun",
           llm_provider: "deepseek",
           tts_provider: "aliyun",
           voice_profile: "professional_warm_female",
@@ -473,13 +474,10 @@ export function App() {
 
   function playOpeningMessage() {
     setAssistantMessages([{ id: makeId("msg"), text: openingMessage, time: nowTime() }]);
-    setIsPlaying(true);
+    pendingTtsTextRef.current = openingMessage;
+    browserTtsFallbackUsedRef.current = true;
     addEvent("assistant.text", "面试官开场白已生成。");
-    schedule(() => {
-      setIsPlaying(false);
-      addEvent("tts.done", "开场白播放完成。");
-      startPendingVoiceCapture();
-    }, 1800);
+    speakBrowserTts(openingMessage);
   }
 
   function handleServerEvent(serverEvent: ServerEvent) {
@@ -488,9 +486,15 @@ export function App() {
       return;
     }
 
+    if (serverEvent.type === "asr.starting") {
+      updateVoiceStatus("后端实时 ASR 正在启动；你可以先说话，音频会先进入缓存。");
+      addEvent("asr.starting", `${serverEvent.provider ?? "ASR"} 正在启动。`);
+      return;
+    }
+
     if (serverEvent.type === "asr.ready") {
       updateVoiceStatus("实时语音链路已就绪，请像电话一样直接说话。");
-      addEvent("asr.ready", "实时语音链路已就绪。");
+      addEvent("asr.ready", `${serverEvent.provider ?? "ASR"} 实时语音链路已就绪。`);
       return;
     }
 
@@ -502,7 +506,7 @@ export function App() {
 
     if (serverEvent.type === "audio.received") {
       if (!spokenTranscriptRef.current.trim()) {
-        updateVoiceStatus(`已接收真实麦克风音频 ${serverEvent.chunks ?? ""} 个分片，当前为分段识别模式。`);
+        updateVoiceStatus(`已接收真实麦克风音频 ${serverEvent.chunks ?? ""} 个分片，正在等待实时 ASR 字幕。`);
       }
       addEvent("audio.received", serverEvent.message ?? "后端已收到真实麦克风音频。");
       return;
@@ -545,6 +549,10 @@ export function App() {
       browserTtsFallbackUsedRef.current = false;
       setAssistantMessages((items) => [...items, { id: makeId("msg"), text: serverEvent.text ?? "", time: nowTime() }]);
       addEvent("assistant.text", "AI 面试官生成追问。");
+      if (serverEvent.text) {
+        browserTtsFallbackUsedRef.current = true;
+        speakBrowserTts(serverEvent.text);
+      }
       return;
     }
 
@@ -557,8 +565,11 @@ export function App() {
 
     if (serverEvent.type === "tts.audio") {
       markTimeline("tts_first_audio", serverEvent.codec ?? "tts");
-      setIsPlaying(serverEvent.status !== "tts_completed" && serverEvent.status !== "cancelled");
-      if (serverEvent.audio_base64 && serverEvent.codec === "mp3") {
+      setIsPlaying(
+        window.speechSynthesis?.speaking ||
+          (serverEvent.status !== "tts_completed" && serverEvent.status !== "cancelled")
+      );
+      if (serverEvent.audio_base64 && serverEvent.codec === "mp3" && !browserTtsFallbackUsedRef.current) {
         playAudioBase64(serverEvent.audio_base64);
       } else if (
         (serverEvent.status === "provider_fallback" || serverEvent.codec === "mock") &&
@@ -657,8 +668,8 @@ export function App() {
 
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      updateVoiceStatus("当前浏览器不支持本地实时字幕；正在使用后端音频段转写。");
-      addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用后端音频段转写。");
+      updateVoiceStatus("当前浏览器不支持本地实时字幕；正在使用后端阿里云实时 ASR。");
+      addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用后端阿里云实时 ASR。");
       if (runtimeMode !== "backend") {
         void startAudioChunkStreaming();
       }
@@ -715,7 +726,7 @@ export function App() {
     };
 
     recognition.onerror = (event) => {
-      updateVoiceStatus("浏览器本地语音识别不可用，正在使用后端音频段转写。");
+      updateVoiceStatus("浏览器本地语音识别不可用，正在使用后端阿里云实时 ASR。");
       addEvent("speech.error", `浏览器文字识别失败：${event.error ?? "unknown"}，改用真实麦克风音频流。`);
       recognition.abort();
       void startAudioChunkStreaming();
@@ -733,8 +744,8 @@ export function App() {
     try {
       recognition.start();
     } catch {
-      updateVoiceStatus("浏览器语音识别未能启动；正在改用后端音频段转写。");
-      addEvent("speech.error", "浏览器语音识别未能启动，改用真实麦克风音频流。");
+      updateVoiceStatus("浏览器语音识别未能启动；正在改用后端阿里云实时 ASR。");
+      addEvent("speech.error", "浏览器语音识别未能启动，改用后端阿里云实时 ASR。");
       void startAudioChunkStreaming();
     }
   }
@@ -833,8 +844,8 @@ export function App() {
       audioSeqRef.current = 0;
       firstAudioAtRef.current = Date.now();
       lastVoiceAtRef.current = 0;
-      updateVoiceStatus("电话模式正在聆听，请直接说话。浏览器字幕实时显示，后端 MiMo 作为分段兜底。");
-      addEvent("audio.pcm.start", "16k PCM 麦克风流已启动，发送到后端分段 ASR 兜底。");
+      updateVoiceStatus("电话模式正在聆听，请直接说话。浏览器字幕和后端实时 ASR 会优先显示。");
+      addEvent("audio.pcm.start", "16k PCM 麦克风流已启动，发送到后端实时 ASR。");
       startNoTextWatchdog();
       startAutoStopWatchdog();
 
@@ -1002,7 +1013,7 @@ export function App() {
     wsRef.current?.close();
     setRuntimeMode("local");
     setSessionId("-");
-    setProviderInfo("mimo STT / deepseek LLM / aliyun TTS");
+    setProviderInfo("aliyun STT / deepseek LLM / aliyun TTS");
     setIsRecording(false);
     isRecordingRef.current = false;
     clearVoiceTimers();
@@ -1053,6 +1064,7 @@ export function App() {
       return;
     }
     window.speechSynthesis.cancel();
+    window.speechSynthesis.resume();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "zh-CN";
     utterance.rate = 0.96;

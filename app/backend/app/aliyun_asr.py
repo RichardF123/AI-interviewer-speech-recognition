@@ -52,6 +52,7 @@ class AliyunRealtimeTranscriber:
             enable_intermediate_result=True,
             enable_punctuation_prediction=True,
             enable_inverse_text_normalization=True,
+            ex={"max_sentence_silence": 700},
         )
         self._started = True
         return True

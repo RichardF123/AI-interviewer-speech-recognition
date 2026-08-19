@@ -4,7 +4,7 @@ import hmac
 import json
 import time
 from typing import Optional
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -28,7 +28,7 @@ class AliyunNlsClient:
         if not settings.aliyun_access_key_id or not settings.aliyun_access_key_secret:
             return None
 
-        token, expire_time = self._create_token()
+        token, expire_time = self._retry(self._create_token, "Aliyun token")
         self._cached_token = token
         self._cached_expire_time = expire_time
         return token
@@ -58,7 +58,7 @@ class AliyunNlsClient:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=20) as response:
+            with self._urlopen_with_retry(request, "Aliyun TTS") as response:
                 content_type = response.headers.get("Content-Type", "")
                 body = response.read()
                 if "audio" not in content_type:
@@ -93,7 +93,7 @@ class AliyunNlsClient:
         signature = base64.b64encode(digest).decode("utf-8")
         query = f"Signature={self._percent_encode(signature)}&{canonicalized}"
         request = Request(f"https://nls-meta.cn-shanghai.aliyuncs.com/?{query}", method="GET")
-        with urlopen(request, timeout=20) as response:
+        with self._urlopen_with_retry(request, "Aliyun token") as response:
             data = json.loads(response.read().decode("utf-8"))
         token = data["Token"]["Id"]
         expire_time = int(data["Token"]["ExpireTime"])
@@ -102,6 +102,23 @@ class AliyunNlsClient:
     @staticmethod
     def _percent_encode(value: object) -> str:
         return quote(str(value), safe="").replace("+", "%20").replace("*", "%2A").replace("%7E", "~")
+
+    def _urlopen_with_retry(self, request: Request, label: str):
+        return self._retry(lambda: urlopen(request, timeout=10), label)
+
+    @staticmethod
+    def _retry(action, label: str, attempts: int = 3):
+        last_error: Optional[BaseException] = None
+        for attempt in range(attempts):
+            try:
+                return action()
+            except HTTPError:
+                raise
+            except (TimeoutError, URLError, OSError) as exc:
+                last_error = exc
+                if attempt < attempts - 1:
+                    time.sleep(0.35 * (attempt + 1))
+        raise RuntimeError(f"{label} request failed after {attempts} attempts: {last_error}") from last_error
 
 
 aliyun_nls = AliyunNlsClient()
