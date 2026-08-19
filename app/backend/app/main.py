@@ -181,16 +181,17 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                         pass
 
                 final_text = latest_asr_text.strip()
-                if not final_text and audio_chunk_count > 0:
-                    final_text = "候选人已经通过语音完成了本轮回答，但阿里云本轮没有返回可用转写。请基于当前面试上下文继续追问。"
-
                 if final_text:
                     stt_final = mock_stt.final_from_demo_answer(final_text)
                     await websocket.send_json(stt_final)
                     await handle_final_transcript(stt_final["text"])
                 else:
                     await websocket.send_json(
-                        event("error", code="NO_AUDIO_TEXT", message="没有收到可提交的语音文本，请检查麦克风权限。")
+                        event(
+                            "error",
+                            code="NO_ASR_TEXT",
+                            message="已收到麦克风音频，但阿里云没有返回可用文字。请检查阿里云项目是否开通实时语音识别，或换 Chrome/Edge 重试浏览器实时字幕。",
+                        )
                     )
                 continue
 

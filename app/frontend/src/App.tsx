@@ -127,6 +127,7 @@ export function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [activeTranscript, setActiveTranscript] = useState("");
+  const [voiceStatus, setVoiceStatus] = useState("");
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
   const [events, setEvents] = useState<EventLog[]>([]);
@@ -266,6 +267,10 @@ export function App() {
     setActiveTranscript(text);
   }
 
+  function updateVoiceStatus(text: string) {
+    setVoiceStatus(text);
+  }
+
   async function requestMicPermission() {
     setMicState("checking");
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -366,18 +371,20 @@ export function App() {
     }
 
     if (serverEvent.type === "asr.ready") {
+      updateVoiceStatus("阿里云实时语音识别已就绪，请直接说话。");
       addEvent("asr.ready", "阿里云实时语音识别已就绪。");
       return;
     }
 
     if (serverEvent.type === "asr.fallback") {
+      updateVoiceStatus("阿里云实时识别不可用，请检查项目权限或浏览器麦克风。");
       addEvent("asr.fallback", serverEvent.message ?? "阿里云实时识别不可用，后端将使用兜底链路。");
       return;
     }
 
     if (serverEvent.type === "audio.received") {
       if (!spokenTranscriptRef.current.trim()) {
-        updateActiveTranscript(`已接收真实麦克风音频 ${serverEvent.chunks ?? ""} 个分片，正在等待阿里云转写。`);
+        updateVoiceStatus(`已接收真实麦克风音频 ${serverEvent.chunks ?? ""} 个分片，正在等待阿里云返回文字。`);
       }
       addEvent("audio.received", serverEvent.message ?? "后端已收到真实麦克风音频。");
       return;
@@ -386,6 +393,7 @@ export function App() {
     if (serverEvent.type === "stt.partial") {
       setIsRecording(true);
       spokenTranscriptRef.current = serverEvent.text ?? "";
+      updateVoiceStatus("");
       updateActiveTranscript(serverEvent.text ?? "");
       setTranscripts((items) => [
         ...items.filter((item) => item.kind !== "partial"),
@@ -398,6 +406,7 @@ export function App() {
     if (serverEvent.type === "stt.final") {
       setIsRecording(false);
       spokenTranscriptRef.current = serverEvent.text ?? "";
+      updateVoiceStatus("");
       updateActiveTranscript("");
       setTranscripts((items) => [
         ...items.filter((item) => item.kind !== "partial"),
@@ -443,6 +452,7 @@ export function App() {
     }
 
     if (serverEvent.type === "error") {
+      updateVoiceStatus(serverEvent.message ?? "语音识别出错，请重试。");
       addEvent("error", `${serverEvent.code ?? "ERROR"}：${serverEvent.message ?? "未知错误"}`);
     }
   }
@@ -455,7 +465,8 @@ export function App() {
 
     const currentSessionState = sessionStateRef.current;
     addEvent("voice.click", currentSessionState === "active" ? "正在启动实时回答。" : "正在先启动面试，再打开麦克风。");
-    updateActiveTranscript("正在启动麦克风，请在浏览器提示中允许权限。");
+    updateActiveTranscript("");
+    updateVoiceStatus("正在启动麦克风，请在浏览器提示中允许权限。");
 
     if (currentSessionState !== "active") {
       pendingAutoRecordRef.current = true;
@@ -482,7 +493,8 @@ export function App() {
     clearTimers();
     setIsRecording(true);
     setIsPlaying(false);
-    updateActiveTranscript("正在启动麦克风，请在浏览器提示中允许权限。");
+    updateActiveTranscript("");
+    updateVoiceStatus("正在启动麦克风，请在浏览器提示中允许权限。");
     setTranscripts([]);
     spokenTranscriptRef.current = "";
     submittedSpeechRef.current = false;
@@ -493,6 +505,7 @@ export function App() {
 
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
+      updateVoiceStatus("当前浏览器不支持本地实时字幕；正在使用阿里云实时识别，若无文字返回请检查阿里云项目权限。");
       addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用阿里云 PCM 音频流。");
       if (runtimeMode !== "backend") {
         void startAudioChunkStreaming();
@@ -508,7 +521,7 @@ export function App() {
     recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
-      updateActiveTranscript("正在实时收听，请直接说话。");
+      updateVoiceStatus("正在实时收听，请直接说话。");
       addEvent("speech.start", "开始实时收听，请直接说话。");
     };
 
@@ -529,6 +542,7 @@ export function App() {
 
       if (interimText) {
         spokenTranscriptRef.current = interimText;
+        updateVoiceStatus("");
         updateActiveTranscript(interimText);
         setTranscripts((items) => [
           ...items.filter((item) => item.kind !== "partial"),
@@ -545,6 +559,7 @@ export function App() {
     };
 
     recognition.onerror = (event) => {
+      updateVoiceStatus("浏览器本地语音识别不可用，正在使用阿里云实时识别。");
       addEvent("speech.error", `浏览器文字识别失败：${event.error ?? "unknown"}，改用真实麦克风音频流。`);
       recognition.abort();
       void startAudioChunkStreaming();
@@ -552,15 +567,15 @@ export function App() {
 
     recognition.onend = () => {
       setIsRecording(false);
-      if (!submittedSpeechRef.current && activeTranscriptRef.current.trim()) {
-        submitFinalAnswer(activeTranscriptRef.current.trim());
+      if (!submittedSpeechRef.current && spokenTranscriptRef.current.trim()) {
+        submitFinalAnswer(spokenTranscriptRef.current.trim());
       }
     };
 
     try {
       recognition.start();
     } catch {
-      updateActiveTranscript("浏览器语音识别未能启动，正在改用真实麦克风音频流。");
+      updateVoiceStatus("浏览器语音识别未能启动；正在改用阿里云实时识别。");
       addEvent("speech.error", "浏览器语音识别未能启动，改用真实麦克风音频流。");
       void startAudioChunkStreaming();
     }
@@ -572,7 +587,8 @@ export function App() {
       submitFinalAnswer(spokenTranscriptRef.current.trim());
     } else if (pcmStreamingRef.current && runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "audio.stop" }));
-      updateActiveTranscript("本轮语音已提交，正在等待 AI 面试官反馈。");
+      updateActiveTranscript("");
+      updateVoiceStatus("本轮语音已提交，正在等待转写结果。");
       addEvent("audio.stop", "已提交阿里云实时语音识别本轮音频。");
     } else if (mediaRecorderRef.current) {
       submitFinalAnswer("候选人已经通过麦克风完成回答。当前浏览器只上传了音频流，阿里云实时 ASR 接入后这里会显示真实转写。");
@@ -603,7 +619,7 @@ export function App() {
         : "audio/webm";
       const recorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = recorder;
-      updateActiveTranscript("正在接收真实麦克风音频。请说话，点击“结束回答”后提交本轮回答。");
+      updateVoiceStatus("正在接收真实麦克风音频。请说话，点击“结束回答”后提交本轮回答。");
       addEvent("audio.start", "真实麦克风音频流已启动。");
 
       recorder.ondataavailable = (event) => {
@@ -648,7 +664,7 @@ export function App() {
       audioProcessorRef.current = processor;
       pcmStreamingRef.current = true;
       audioSeqRef.current = 0;
-      updateActiveTranscript("正在通过阿里云接收真实麦克风音频，请直接说话。");
+      updateVoiceStatus("正在通过阿里云接收真实麦克风音频，请直接说话。");
       addEvent("audio.pcm.start", "16k PCM 麦克风流已启动，发送到后端阿里云 ASR。");
 
       processor.onaudioprocess = (audioEvent) => {
@@ -781,6 +797,7 @@ export function App() {
     setIsRecording(false);
     setIsPlaying(false);
     updateActiveTranscript("");
+    updateVoiceStatus("");
     addEvent("session.ended", "面试已结束。");
   }
 
@@ -796,6 +813,7 @@ export function App() {
     setIsRecording(false);
     setIsPlaying(false);
     updateActiveTranscript("");
+    updateVoiceStatus("");
     setTranscripts([]);
     setAssistantMessages([]);
     setLatency({ stt: "-", llm: "-", tts: "-", total: "-", interrupt: "-" });
@@ -881,7 +899,7 @@ export function App() {
             <span>{isRecording ? "正在听候选人回答" : "候选人语音输入"}</span>
           </div>
           <div className={isRecording ? "speech-box listening" : "speech-box"}>
-            {activeTranscript || finalTranscript?.text || "点击下方“实时回答”，允许麦克风权限后直接说话。这里会显示实时字幕或音频流状态。"}
+            {activeTranscript || finalTranscript?.text || voiceStatus || "点击下方“实时回答”，允许麦克风权限后直接说话。这里只会显示候选人转写或识别状态。"}
           </div>
           <p className="hint">规则：partial 只展示给用户，final 才会进入 AI 面试官理解和追问。</p>
         </section>
