@@ -140,6 +140,7 @@ export function App() {
   });
   const wsRef = useRef<WebSocket | null>(null);
   const sessionStateRef = useRef<SessionState>("idle");
+  const isRecordingRef = useRef(false);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -148,6 +149,11 @@ export function App() {
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const pcmStreamingRef = useRef(false);
+  const lastVoiceAtRef = useRef(0);
+  const lastVoiceStatusAtRef = useRef(0);
+  const firstAudioAtRef = useRef(0);
+  const noTextTimerRef = useRef<number | null>(null);
+  const autoStopTimerRef = useRef<number | null>(null);
   const audioSeqRef = useRef(0);
   const activeTranscriptRef = useRef("");
   const spokenTranscriptRef = useRef("");
@@ -179,6 +185,10 @@ export function App() {
   useEffect(() => {
     sessionStateRef.current = sessionState;
   }, [sessionState]);
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
 
   useEffect(() => {
     return () => {
@@ -249,6 +259,14 @@ export function App() {
     return pcm;
   }
 
+  function getAudioLevel(input: Float32Array) {
+    let sum = 0;
+    for (let index = 0; index < input.length; index += 1) {
+      sum += input[index] * input[index];
+    }
+    return Math.sqrt(sum / input.length);
+  }
+
   function sendAudioChunk(audioBase64: string, format: AudioFormat) {
     if (runtimeMode !== "backend" || wsRef.current?.readyState !== WebSocket.OPEN) return;
     audioSeqRef.current += 1;
@@ -269,6 +287,39 @@ export function App() {
 
   function updateVoiceStatus(text: string) {
     setVoiceStatus(text);
+  }
+
+  function clearVoiceTimers() {
+    if (noTextTimerRef.current) {
+      window.clearTimeout(noTextTimerRef.current);
+      noTextTimerRef.current = null;
+    }
+    if (autoStopTimerRef.current) {
+      window.clearInterval(autoStopTimerRef.current);
+      autoStopTimerRef.current = null;
+    }
+  }
+
+  function startNoTextWatchdog() {
+    if (noTextTimerRef.current) return;
+    noTextTimerRef.current = window.setTimeout(() => {
+      if (!spokenTranscriptRef.current.trim() && isRecordingRef.current) {
+        updateVoiceStatus("已检测到麦克风输入，但 1.5 秒内没有识别文字；请检查阿里云实时 ASR 权限，或用 Chrome/Edge 打开本页。");
+        addEvent("asr.slow", "已收到声音，但 ASR 尚未返回文字。");
+      }
+      noTextTimerRef.current = null;
+    }, 1500);
+  }
+
+  function startAutoStopWatchdog() {
+    if (autoStopTimerRef.current) return;
+    autoStopTimerRef.current = window.setInterval(() => {
+      if (!pcmStreamingRef.current || spokenTranscriptRef.current.trim()) return;
+      if (lastVoiceAtRef.current && Date.now() - lastVoiceAtRef.current > 1200) {
+        updateVoiceStatus("检测到停顿，正在提交本轮语音。");
+        stopLiveAnswer();
+      }
+    }, 250);
   }
 
   async function requestMicPermission() {
@@ -392,7 +443,9 @@ export function App() {
 
     if (serverEvent.type === "stt.partial") {
       setIsRecording(true);
+      isRecordingRef.current = true;
       spokenTranscriptRef.current = serverEvent.text ?? "";
+      clearVoiceTimers();
       updateVoiceStatus("");
       updateActiveTranscript(serverEvent.text ?? "");
       setTranscripts((items) => [
@@ -405,7 +458,9 @@ export function App() {
 
     if (serverEvent.type === "stt.final") {
       setIsRecording(false);
+      isRecordingRef.current = false;
       spokenTranscriptRef.current = serverEvent.text ?? "";
+      clearVoiceTimers();
       updateVoiceStatus("");
       updateActiveTranscript("");
       setTranscripts((items) => [
@@ -446,6 +501,8 @@ export function App() {
     if (serverEvent.type === "control.interrupted") {
       setIsPlaying(false);
       setIsRecording(false);
+      isRecordingRef.current = false;
+      clearVoiceTimers();
       setLatency((item) => ({ ...item, interrupt: "80ms" }));
       addEvent("control.interrupted", "后端已取消当前 TTS。");
       return;
@@ -492,6 +549,7 @@ export function App() {
 
     clearTimers();
     setIsRecording(true);
+    isRecordingRef.current = true;
     setIsPlaying(false);
     updateActiveTranscript("");
     updateVoiceStatus("正在启动麦克风，请在浏览器提示中允许权限。");
@@ -567,6 +625,8 @@ export function App() {
 
     recognition.onend = () => {
       setIsRecording(false);
+      isRecordingRef.current = false;
+      clearVoiceTimers();
       if (!submittedSpeechRef.current && spokenTranscriptRef.current.trim()) {
         submitFinalAnswer(spokenTranscriptRef.current.trim());
       }
@@ -596,6 +656,8 @@ export function App() {
     recognitionRef.current?.stop();
     stopMediaRecorder();
     setIsRecording(false);
+    isRecordingRef.current = false;
+    clearVoiceTimers();
   }
 
   async function startAudioChunkStreaming() {
@@ -606,6 +668,7 @@ export function App() {
 
     if (!window.MediaRecorder) {
       setIsRecording(false);
+      isRecordingRef.current = false;
       addEvent("audio.unsupported", "当前浏览器不支持 MediaRecorder，请使用 Chrome 或 Edge。");
       return;
     }
@@ -634,13 +697,16 @@ export function App() {
       };
       recorder.onerror = () => {
         setIsRecording(false);
+        isRecordingRef.current = false;
         addEvent("audio.error", "麦克风录音启动失败。");
       };
       recorder.start(700);
       setIsRecording(true);
+      isRecordingRef.current = true;
       setMicState("granted");
     } catch {
       setIsRecording(false);
+      isRecordingRef.current = false;
       setMicState("simulated");
       addEvent("audio.error", "无法打开麦克风，请检查浏览器权限。");
     }
@@ -664,11 +730,24 @@ export function App() {
       audioProcessorRef.current = processor;
       pcmStreamingRef.current = true;
       audioSeqRef.current = 0;
+      firstAudioAtRef.current = Date.now();
+      lastVoiceAtRef.current = 0;
       updateVoiceStatus("正在通过阿里云接收真实麦克风音频，请直接说话。");
       addEvent("audio.pcm.start", "16k PCM 麦克风流已启动，发送到后端阿里云 ASR。");
+      startNoTextWatchdog();
+      startAutoStopWatchdog();
 
       processor.onaudioprocess = (audioEvent) => {
         const input = audioEvent.inputBuffer.getChannelData(0);
+        const level = getAudioLevel(input);
+        if (level > 0.025) {
+          const now = Date.now();
+          lastVoiceAtRef.current = now;
+          if (!spokenTranscriptRef.current.trim() && now - lastVoiceStatusAtRef.current > 250) {
+            lastVoiceStatusAtRef.current = now;
+            updateVoiceStatus(`检测到你在说话，正在实时上传音频。音量 ${Math.round(level * 100)}`);
+          }
+        }
         const pcm = downsampleToPcm16(input, audioContext.sampleRate, 16000);
         if (!pcm.byteLength) return;
         sendAudioChunk(arrayBufferToBase64(pcm.buffer), {
@@ -681,6 +760,7 @@ export function App() {
       source.connect(processor);
       processor.connect(audioContext.destination);
       setIsRecording(true);
+      isRecordingRef.current = true;
       setMicState("granted");
       return true;
     } catch {
@@ -712,6 +792,8 @@ export function App() {
     spokenTranscriptRef.current = text;
     updateActiveTranscript("");
     setIsRecording(false);
+    isRecordingRef.current = false;
+    clearVoiceTimers();
     setTranscripts((items) => [
       ...items.filter((item) => item.kind !== "partial"),
       { id: makeId("stt"), kind: "final", text, time: nowTime() }
@@ -795,6 +877,8 @@ export function App() {
     sessionStateRef.current = "ended";
     setSessionState("ended");
     setIsRecording(false);
+    isRecordingRef.current = false;
+    clearVoiceTimers();
     setIsPlaying(false);
     updateActiveTranscript("");
     updateVoiceStatus("");
@@ -811,6 +895,8 @@ export function App() {
     setSessionId("-");
     setProviderInfo("aliyun STT / deepseek LLM / aliyun TTS");
     setIsRecording(false);
+    isRecordingRef.current = false;
+    clearVoiceTimers();
     setIsPlaying(false);
     updateActiveTranscript("");
     updateVoiceStatus("");
