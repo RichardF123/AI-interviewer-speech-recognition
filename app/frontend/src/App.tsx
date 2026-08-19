@@ -70,6 +70,8 @@ interface ServerEvent {
   type: string;
   text?: string;
   status?: string;
+  codec?: string;
+  audio_base64?: string;
   message?: string;
   code?: string;
   stt_final_latency_ms?: number;
@@ -129,6 +131,7 @@ export function App() {
   });
   const wsRef = useRef<WebSocket | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const activeTranscriptRef = useRef("");
   const submittedSpeechRef = useRef(false);
   const timers = useRef<number[]>([]);
@@ -158,6 +161,7 @@ export function App() {
     return () => {
       clearTimers();
       recognitionRef.current?.abort();
+      audioRef.current?.pause();
       wsRef.current?.close();
     };
   }, []);
@@ -305,6 +309,9 @@ export function App() {
 
     if (serverEvent.type === "tts.audio") {
       setIsPlaying(serverEvent.status !== "tts_completed" && serverEvent.status !== "cancelled");
+      if (serverEvent.audio_base64 && serverEvent.codec === "mp3") {
+        playAudioBase64(serverEvent.audio_base64);
+      }
       addEvent("tts.audio", `TTS 状态：${serverEvent.status ?? "streaming"}`);
       return;
     }
@@ -481,6 +488,7 @@ export function App() {
   function interruptPlayback() {
     clearTimers();
     recognitionRef.current?.abort();
+    audioRef.current?.pause();
     setIsPlaying(false);
     setIsRecording(false);
     if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
@@ -495,6 +503,7 @@ export function App() {
   function endInterview() {
     clearTimers();
     recognitionRef.current?.abort();
+    audioRef.current?.pause();
     wsRef.current?.close();
     setSessionState("ended");
     setIsRecording(false);
@@ -506,6 +515,7 @@ export function App() {
   function resetRuntime() {
     clearTimers();
     recognitionRef.current?.abort();
+    audioRef.current?.pause();
     wsRef.current?.close();
     setRuntimeMode("local");
     setSessionId("-");
@@ -517,6 +527,22 @@ export function App() {
     setAssistantMessages([]);
     setLatency({ stt: "-", llm: "-", tts: "-", total: "-", interrupt: "-" });
     setEvents([]);
+  }
+
+  function playAudioBase64(audioBase64: string) {
+    audioRef.current?.pause();
+    const audio = new Audio(`data:audio/mpeg;base64,${audioBase64}`);
+    audioRef.current = audio;
+    setIsPlaying(true);
+    audio.onended = () => setIsPlaying(false);
+    audio.onerror = () => {
+      setIsPlaying(false);
+      addEvent("tts.error", "浏览器播放 TTS 音频失败。");
+    };
+    void audio.play().catch(() => {
+      setIsPlaying(false);
+      addEvent("tts.blocked", "浏览器阻止自动播放，请再次点击页面后重试。");
+    });
   }
 
   function resetDemo() {

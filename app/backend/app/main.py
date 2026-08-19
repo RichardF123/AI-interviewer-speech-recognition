@@ -32,6 +32,22 @@ async def health() -> dict:
     return {"status": "ok", "service": settings.app_name, "env": settings.app_env}
 
 
+@app.get("/api/provider-status")
+async def provider_status() -> dict:
+    return {
+        "deepseek": {
+            "configured": bool(settings.deepseek_api_key),
+            "model": settings.deepseek_model,
+        },
+        "aliyun": {
+            "appkey_configured": bool(settings.aliyun_nls_app_key),
+            "token_configured": bool(settings.aliyun_nls_token),
+            "access_key_configured": bool(settings.aliyun_access_key_id and settings.aliyun_access_key_secret),
+            "tts_voice": settings.aliyun_tts_voice,
+        },
+    }
+
+
 @app.post("/api/interview-sessions", response_model=CreateInterviewSessionResponse)
 async def create_interview_session(
     http_request: Request,

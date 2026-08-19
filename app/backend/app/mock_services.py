@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from fastapi import WebSocket
 
+from app.aliyun_nls import aliyun_nls
 from app.config import settings
 from app.schemas import SessionState, event
 
@@ -94,6 +95,39 @@ class MockInterviewOrchestrator:
 class MockTTSService:
     async def stream_audio(self, websocket: WebSocket, session: SessionState, turn_id: str, text: str) -> None:
         session.is_tts_playing = True
+        if session.tts_provider == "aliyun":
+            try:
+                audio = await asyncio.to_thread(aliyun_nls.synthesize_tts, text)
+                if audio:
+                    await websocket.send_json(
+                        event(
+                            "tts.audio",
+                            turn_id=turn_id,
+                            seq=1,
+                            status="tts_completed",
+                            codec="mp3",
+                            sample_rate=16000,
+                            audio_base64=base64.b64encode(audio).decode("ascii"),
+                            provider="aliyun",
+                            text=text,
+                        )
+                    )
+                    session.is_tts_playing = False
+                    return
+            except Exception as exc:
+                await websocket.send_json(
+                    event(
+                        "tts.audio",
+                        turn_id=turn_id,
+                        seq=0,
+                        status="provider_fallback",
+                        codec="mock",
+                        audio_base64="",
+                        provider="aliyun",
+                        note=f"阿里云 TTS 暂不可用，已回退 mock：{exc}",
+                    )
+                )
+
         placeholder_audio = base64.b64encode(b"mock-audio-chunk").decode("ascii")
         chunks = [
             "tts_started",
