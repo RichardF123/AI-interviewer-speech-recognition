@@ -463,6 +463,11 @@ export function App() {
     setTranscripts([]);
     submittedSpeechRef.current = false;
 
+    if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
+      void startAudioChunkStreaming();
+      return;
+    }
+
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
       addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用阿里云 PCM 音频流。");
