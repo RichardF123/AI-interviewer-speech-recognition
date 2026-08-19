@@ -149,6 +149,7 @@ export function App() {
   const pcmStreamingRef = useRef(false);
   const audioSeqRef = useRef(0);
   const activeTranscriptRef = useRef("");
+  const spokenTranscriptRef = useRef("");
   const submittedSpeechRef = useRef(false);
   const pendingAutoRecordRef = useRef(false);
   const timers = useRef<number[]>([]);
@@ -375,13 +376,16 @@ export function App() {
     }
 
     if (serverEvent.type === "audio.received") {
-      updateActiveTranscript(`已接收真实麦克风音频 ${serverEvent.chunks ?? ""} 个分片，正在等待阿里云转写。`);
+      if (!spokenTranscriptRef.current.trim()) {
+        updateActiveTranscript(`已接收真实麦克风音频 ${serverEvent.chunks ?? ""} 个分片，正在等待阿里云转写。`);
+      }
       addEvent("audio.received", serverEvent.message ?? "后端已收到真实麦克风音频。");
       return;
     }
 
     if (serverEvent.type === "stt.partial") {
       setIsRecording(true);
+      spokenTranscriptRef.current = serverEvent.text ?? "";
       updateActiveTranscript(serverEvent.text ?? "");
       setTranscripts((items) => [
         ...items.filter((item) => item.kind !== "partial"),
@@ -393,6 +397,7 @@ export function App() {
 
     if (serverEvent.type === "stt.final") {
       setIsRecording(false);
+      spokenTranscriptRef.current = serverEvent.text ?? "";
       updateActiveTranscript("");
       setTranscripts((items) => [
         ...items.filter((item) => item.kind !== "partial"),
@@ -479,17 +484,19 @@ export function App() {
     setIsPlaying(false);
     updateActiveTranscript("正在启动麦克风，请在浏览器提示中允许权限。");
     setTranscripts([]);
+    spokenTranscriptRef.current = "";
     submittedSpeechRef.current = false;
 
     if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
       void startAudioChunkStreaming();
-      return;
     }
 
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
       addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用阿里云 PCM 音频流。");
-      void startAudioChunkStreaming();
+      if (runtimeMode !== "backend") {
+        void startAudioChunkStreaming();
+      }
       return;
     }
 
@@ -521,6 +528,7 @@ export function App() {
       }
 
       if (interimText) {
+        spokenTranscriptRef.current = interimText;
         updateActiveTranscript(interimText);
         setTranscripts((items) => [
           ...items.filter((item) => item.kind !== "partial"),
@@ -530,6 +538,7 @@ export function App() {
       }
 
       if (finalText) {
+        spokenTranscriptRef.current = finalText;
         submitFinalAnswer(finalText);
         recognition.stop();
       }
@@ -559,12 +568,12 @@ export function App() {
 
   function stopLiveAnswer() {
     if (!isRecording) return;
-    if (pcmStreamingRef.current && runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
+    if (spokenTranscriptRef.current.trim()) {
+      submitFinalAnswer(spokenTranscriptRef.current.trim());
+    } else if (pcmStreamingRef.current && runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "audio.stop" }));
       updateActiveTranscript("本轮语音已提交，正在等待 AI 面试官反馈。");
       addEvent("audio.stop", "已提交阿里云实时语音识别本轮音频。");
-    } else if (activeTranscriptRef.current.trim()) {
-      submitFinalAnswer(activeTranscriptRef.current.trim());
     } else if (mediaRecorderRef.current) {
       submitFinalAnswer("候选人已经通过麦克风完成回答。当前浏览器只上传了音频流，阿里云实时 ASR 接入后这里会显示真实转写。");
     }
@@ -684,6 +693,7 @@ export function App() {
   function submitFinalAnswer(text: string) {
     if (submittedSpeechRef.current) return;
     submittedSpeechRef.current = true;
+    spokenTranscriptRef.current = text;
     updateActiveTranscript("");
     setIsRecording(false);
     setTranscripts((items) => [

@@ -3,7 +3,7 @@ import base64
 import json
 import time
 from typing import Optional
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
@@ -46,15 +46,25 @@ class MockInterviewOrchestrator:
         if settings.deepseek_api_key:
             try:
                 return await asyncio.to_thread(self._call_deepseek, final_text)
-            except Exception:
+            except Exception as exc:
                 # Demo must remain usable even when the external LLM is unavailable.
+                print(f"DeepSeek fallback: {exc}", flush=True)
                 pass
 
         await asyncio.sleep(0.15)
-        return (
-            "好的，我理解了。你刚才提到项目中的关键优化。"
-            "我想继续追问一下，你当时如何判断这次优化真的带来了业务收益？"
-        )
+        return self._local_interviewer_followup(final_text)
+
+    def _local_interviewer_followup(self, final_text: str) -> str:
+        text = final_text.strip()
+        if "没有返回可用转写" in text:
+            return "我这边已经收到你的语音回答，但转写结果还不稳定。你可以用一句话补充说明，这个项目里你亲自负责的最关键部分是什么？"
+        if any(keyword in text for keyword in ("排序", "推荐", "匹配", "召回")):
+            return "你提到了匹配或排序策略。我想追问一个更具体的问题：你当时如何设计评估指标，来证明排序结果不仅相关，而且真的提升了业务转化？"
+        if any(keyword in text for keyword in ("语音", "识别", "ASR", "TTS", "面试官")):
+            return "你提到了语音链路。我想继续了解一下：如果候选人说话中断、重复或者噪声比较大，你会怎么设计实时转写和追问生成之间的容错机制？"
+        if any(keyword in text for keyword in ("模型", "大模型", "LLM", "AI")):
+            return "你提到了模型能力。我想追问一下：你会如何判断这个模型生成的追问是有效的，而不是只是在泛泛复述候选人的回答？"
+        return f"我听到你刚才的回答重点是：{text[:60]}。我想继续追问一下，这件事里最难的技术取舍是什么，你最后为什么选择那个方案？"
 
     def _call_deepseek(self, final_text: str) -> str:
         payload = {
@@ -84,8 +94,11 @@ class MockInterviewOrchestrator:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=20) as response:
+            with urlopen(request, timeout=8) as response:
                 data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"DeepSeek request failed: HTTP {exc.code} {body[:300]}") from exc
         except URLError as exc:
             raise RuntimeError(f"DeepSeek request failed: {exc}") from exc
 

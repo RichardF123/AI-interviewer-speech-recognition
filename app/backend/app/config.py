@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     mock_tts_chunk_delay_ms: int = 180
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_model: str = "deepseek-chat"
     aliyun_access_key_id: str = ""
     aliyun_access_key_secret: str = ""
     aliyun_nls_app_key: str = ""
