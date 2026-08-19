@@ -1,7 +1,10 @@
 import asyncio
 import base64
+import json
 import time
 from typing import Optional
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from fastapi import WebSocket
@@ -39,11 +42,53 @@ class MockSTTService:
 
 class MockInterviewOrchestrator:
     async def respond_to_final_transcript(self, final_text: str) -> str:
+        if settings.deepseek_api_key:
+            try:
+                return await asyncio.to_thread(self._call_deepseek, final_text)
+            except Exception:
+                # Demo must remain usable even when the external LLM is unavailable.
+                pass
+
         await asyncio.sleep(0.15)
         return (
             "好的，我理解了。你刚才提到项目中的关键优化。"
             "我想继续追问一下，你当时如何判断这次优化真的带来了业务收益？"
         )
+
+    def _call_deepseek(self, final_text: str) -> str:
+        payload = {
+            "model": settings.deepseek_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是一个专业、温和、克制的 AI 面试官。"
+                        "请基于候选人的回答生成一个简短追问。"
+                        "回复必须适合 TTS 朗读，不要使用 Markdown、编号或复杂符号。"
+                    ),
+                },
+                {"role": "user", "content": final_text},
+            ],
+            "stream": False,
+            "temperature": 0.5,
+            "max_tokens": 180,
+        }
+        request = Request(
+            f"{settings.deepseek_base_url.rstrip('/')}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {settings.deepseek_api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=20) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except URLError as exc:
+            raise RuntimeError(f"DeepSeek request failed: {exc}") from exc
+
+        return data["choices"][0]["message"]["content"].strip()
 
 
 class MockTTSService:

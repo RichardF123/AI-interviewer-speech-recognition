@@ -43,6 +43,7 @@ async def create_interview_session(
         session_id=session.session_id,
         websocket_url=f"ws://{host}/ws/voice/session?session_id={session.session_id}",
         stt_provider=session.stt_provider,
+        llm_provider=session.llm_provider,
         tts_provider=session.tts_provider,
         voice_profile=session.voice_profile,
     )
@@ -72,6 +73,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
             "session.ready",
             session_id=session.session_id,
             stt_provider=session.stt_provider,
+            llm_provider=session.llm_provider,
             tts_provider=session.tts_provider,
             voice_profile=session.voice_profile,
         )

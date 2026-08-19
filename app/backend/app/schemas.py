@@ -9,6 +9,7 @@ class CreateInterviewSessionRequest(BaseModel):
     job_id: Optional[str] = None
     language: str = "zh-CN"
     stt_provider: str = "mock"
+    llm_provider: str = "mock"
     tts_provider: str = "mock"
     voice_profile: str = "professional_warm_female"
     enable_recording: bool = False
@@ -18,6 +19,7 @@ class CreateInterviewSessionResponse(BaseModel):
     session_id: str
     websocket_url: str
     stt_provider: str
+    llm_provider: str
     tts_provider: str
     voice_profile: str
 
@@ -28,6 +30,7 @@ class SessionState(BaseModel):
     job_id: Optional[str] = None
     language: str = "zh-CN"
     stt_provider: str = "mock"
+    llm_provider: str = "mock"
     tts_provider: str = "mock"
     voice_profile: str = "professional_warm_female"
     is_tts_playing: bool = False

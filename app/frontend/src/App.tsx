@@ -84,7 +84,7 @@ export function App() {
   const [micState, setMicState] = useState<MicState>("unknown");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("local");
   const [sessionId, setSessionId] = useState("-");
-  const [providerInfo, setProviderInfo] = useState("mock STT / mock TTS");
+  const [providerInfo, setProviderInfo] = useState("aliyun STT / deepseek LLM / mock TTS");
   const [isRecording, setIsRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [activeTranscript, setActiveTranscript] = useState("");
@@ -175,7 +175,8 @@ export function App() {
           candidate_id: "demo_candidate",
           job_id: "ai_interviewer_demo",
           language: "zh-CN",
-          stt_provider: "mock",
+          stt_provider: "aliyun",
+          llm_provider: "deepseek",
           tts_provider: "mock",
           voice_profile: "professional_warm_female",
           enable_recording: false
@@ -188,7 +189,7 @@ export function App() {
 
       const session = await response.json();
       setSessionId(session.session_id);
-      setProviderInfo(`${session.stt_provider} STT / ${session.tts_provider} TTS`);
+      setProviderInfo(`${session.stt_provider} STT / ${session.llm_provider} LLM / ${session.tts_provider} TTS`);
       connectWebSocket(session.websocket_url);
     } catch (error) {
       setRuntimeMode("local");
@@ -383,7 +384,7 @@ export function App() {
     wsRef.current?.close();
     setRuntimeMode("local");
     setSessionId("-");
-    setProviderInfo("mock STT / mock TTS");
+    setProviderInfo("aliyun STT / deepseek LLM / mock TTS");
     setIsRecording(false);
     setIsPlaying(false);
     setActiveTranscript("");

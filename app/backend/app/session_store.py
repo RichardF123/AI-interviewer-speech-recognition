@@ -13,6 +13,7 @@ class InMemorySessionStore:
             job_id=request.job_id,
             language=request.language,
             stt_provider=request.stt_provider,
+            llm_provider=request.llm_provider,
             tts_provider=request.tts_provider,
             voice_profile=request.voice_profile,
         )
