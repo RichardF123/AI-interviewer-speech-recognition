@@ -19,6 +19,25 @@ from app.session_store import session_store
 
 
 app = FastAPI(title=settings.app_name)
+SYSTEM_STATUS_PATTERNS = (
+    "已接收",
+    "等待转写",
+    "正在等待",
+    "正在上传音频",
+    "检测到你在说话",
+    "本轮语音已提交",
+    "麦克风",
+    "ASR",
+    "实时识别",
+    "浏览器语音识别",
+)
+
+
+def is_candidate_text(text: str) -> bool:
+    cleaned = text.strip()
+    if len(cleaned) < 2:
+        return False
+    return not any(pattern in cleaned for pattern in SYSTEM_STATUS_PATTERNS)
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,9 +121,31 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
     asr_event_task: Optional[asyncio.Task] = None
     latest_asr_text = ""
     audio_chunk_count = 0
+    final_already_sent = False
 
     async def handle_final_transcript(final_text: str) -> None:
-        nonlocal current_tts_task
+        nonlocal current_tts_task, final_already_sent
+
+        final_text = final_text.strip()
+        if not is_candidate_text(final_text):
+            await websocket.send_json(
+                event(
+                    "error",
+                    code="NO_CANDIDATE_TEXT",
+                    message="没有拿到可用候选人文本，已阻止 LLM 触发。",
+                )
+            )
+            return
+        if final_already_sent:
+            await websocket.send_json(
+                event(
+                    "guard.blocked",
+                    reason="duplicate_final",
+                    message="本轮 final 已处理，已阻止重复触发 LLM。",
+                )
+            )
+            return
+        final_already_sent = True
 
         metrics = TurnMetrics()
         turn_id = f"t_{uuid4().hex[:8]}"
@@ -131,7 +172,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
             if asr_event.get("text"):
                 latest_asr_text = asr_event["text"]
             await websocket.send_json(asr_event)
-            if asr_event.get("type") == "stt.final":
+            if asr_event.get("type") == "stt.final" and is_candidate_text(asr_event.get("text", "")):
                 await handle_final_transcript(asr_event.get("text", ""))
 
     if session.stt_provider == "aliyun":
@@ -157,6 +198,10 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 continue
 
             if incoming.type == "audio.chunk":
+                if final_already_sent:
+                    final_already_sent = False
+                    latest_asr_text = ""
+                    audio_chunk_count = 0
                 codec = (incoming.format or {}).get("codec")
                 audio_chunk_count += 1
                 if aliyun_asr and codec == "pcm_s16le" and incoming.audio_base64:

@@ -236,7 +236,8 @@ button:disabled {
 }
 
 .main-panel,
-.event-log {
+.event-log,
+.timeline-panel {
   border: 1px solid #d9ded7;
   border-radius: 12px;
   background: #ffffff;
@@ -304,7 +305,7 @@ button:disabled {
 
 .bottom-grid {
   display: grid;
-  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+  grid-template-columns: minmax(0, 0.8fr) minmax(280px, 1fr) minmax(0, 1.15fr);
   gap: 14px;
 }
 
@@ -328,8 +329,47 @@ button:disabled {
   line-height: 1.2;
 }
 
-.event-log {
+.event-log,
+.timeline-panel {
   padding: 16px;
+}
+
+.timeline-list {
+  display: grid;
+  gap: 8px;
+}
+
+.timeline-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 80px 110px;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid #edf0ec;
+  border-radius: 8px;
+  background: #fbfcfa;
+}
+
+.timeline-row.done {
+  border-color: #b8c9bd;
+  background: #f4faf5;
+}
+
+.timeline-row strong {
+  overflow: hidden;
+  color: #263027;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-row span,
+.timeline-row em {
+  color: #687268;
+  font-size: 12px;
+  font-style: normal;
+  text-align: right;
 }
 
 .event-row {
@@ -391,5 +431,14 @@ button:disabled {
   .event-row {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .timeline-row {
+    grid-template-columns: 1fr;
+  }
+
+  .timeline-row span,
+  .timeline-row em {
+    text-align: left;
   }
 }

@@ -73,6 +73,22 @@ interface EventLog {
   text: string;
 }
 
+type TimelineKey =
+  | "mic_start"
+  | "first_audio_chunk"
+  | "first_asr_partial"
+  | "final_to_llm"
+  | "llm_first_text"
+  | "tts_first_audio";
+
+interface TimelineItem {
+  key: TimelineKey;
+  label: string;
+  at?: number;
+  delta?: number;
+  source?: string;
+}
+
 interface ServerEvent {
   type: string;
   text?: string;
@@ -91,6 +107,26 @@ interface ServerEvent {
 }
 
 const apiBase = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
+const timelineTemplate: TimelineItem[] = [
+  { key: "mic_start", label: "mic_start" },
+  { key: "first_audio_chunk", label: "first_audio_chunk" },
+  { key: "first_asr_partial", label: "first_asr_partial" },
+  { key: "final_to_llm", label: "final_to_llm" },
+  { key: "llm_first_text", label: "llm_first_text" },
+  { key: "tts_first_audio", label: "tts_first_audio" }
+];
+const systemStatusPatterns = [
+  "已接收",
+  "等待转写",
+  "正在等待",
+  "正在上传音频",
+  "检测到你在说话",
+  "本轮语音已提交",
+  "麦克风",
+  "ASR",
+  "实时识别",
+  "浏览器语音识别"
+];
 
 const openingMessage =
   "你好，我是本轮技术面试的 AI 面试官。我们先从你的项目经历开始，请你用两到三分钟介绍一个最能代表你能力的项目。";
@@ -132,6 +168,7 @@ export function App() {
   const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
   const [events, setEvents] = useState<EventLog[]>([]);
+  const [timeline, setTimeline] = useState<TimelineItem[]>(timelineTemplate);
   const [latency, setLatency] = useState({
     stt: "-",
     llm: "-",
@@ -160,6 +197,7 @@ export function App() {
   const spokenTranscriptRef = useRef("");
   const submittedSpeechRef = useRef(false);
   const pendingAutoRecordRef = useRef(false);
+  const timelineStartAtRef = useRef<number | null>(null);
   const timers = useRef<number[]>([]);
 
   const steps = useMemo(
@@ -213,6 +251,32 @@ export function App() {
 
   function addEvent(type: string, text: string) {
     setEvents((items) => [{ id: makeId("evt"), time: nowTime(), type, text }, ...items].slice(0, 6));
+  }
+
+  function resetTimeline() {
+    timelineStartAtRef.current = null;
+    setTimeline(timelineTemplate.map((item) => ({ ...item })));
+  }
+
+  function markTimeline(key: TimelineKey, source?: string) {
+    const at = performance.now();
+    if (key === "mic_start" || timelineStartAtRef.current === null) {
+      timelineStartAtRef.current = at;
+    }
+    const startedAt = timelineStartAtRef.current ?? at;
+    setTimeline((items) =>
+      items.map((item) =>
+        item.key === key && item.at === undefined
+          ? { ...item, at, delta: Math.max(0, Math.round(at - startedAt)), source }
+          : item
+      )
+    );
+  }
+
+  function isCandidateText(text: string) {
+    const trimmed = text.trim();
+    if (trimmed.length < 2) return false;
+    return !systemStatusPatterns.some((pattern) => trimmed.includes(pattern));
   }
 
   async function blobToBase64(blob: Blob) {
@@ -271,6 +335,9 @@ export function App() {
   function sendAudioChunk(audioBase64: string, format: AudioFormat) {
     if (runtimeMode !== "backend" || wsRef.current?.readyState !== WebSocket.OPEN) return;
     audioSeqRef.current += 1;
+    if (audioSeqRef.current === 1) {
+      markTimeline("first_audio_chunk", "frontend_pcm");
+    }
     wsRef.current.send(
       JSON.stringify({
         type: "audio.chunk",
@@ -443,6 +510,7 @@ export function App() {
     }
 
     if (serverEvent.type === "stt.partial") {
+      markTimeline("first_asr_partial", serverEvent.status ?? "asr");
       setIsRecording(true);
       isRecordingRef.current = true;
       spokenTranscriptRef.current = serverEvent.text ?? "";
@@ -473,18 +541,21 @@ export function App() {
     }
 
     if (serverEvent.type === "assistant.text") {
+      markTimeline("llm_first_text", "backend");
       setAssistantMessages((items) => [...items, { id: makeId("msg"), text: serverEvent.text ?? "", time: nowTime() }]);
       addEvent("assistant.text", "AI 面试官生成追问。");
       return;
     }
 
     if (serverEvent.type === "llm.input") {
+      markTimeline("final_to_llm", "backend");
       setLlmInput(serverEvent.text ?? "");
       addEvent("llm.input", "候选人 final 文本已发送给大模型。");
       return;
     }
 
     if (serverEvent.type === "tts.audio") {
+      markTimeline("tts_first_audio", serverEvent.codec ?? "tts");
       setIsPlaying(serverEvent.status !== "tts_completed" && serverEvent.status !== "cancelled");
       if (serverEvent.audio_base64 && serverEvent.codec === "mp3") {
         playAudioBase64(serverEvent.audio_base64);
@@ -555,6 +626,8 @@ export function App() {
     }
 
     clearTimers();
+    resetTimeline();
+    markTimeline("mic_start", "browser");
     setIsRecording(true);
     isRecordingRef.current = true;
     setIsPlaying(false);
@@ -606,6 +679,7 @@ export function App() {
       }
 
       if (interimText) {
+        markTimeline("first_asr_partial", "browser_speech");
         spokenTranscriptRef.current = interimText;
         updateVoiceStatus("");
         updateActiveTranscript(interimText);
@@ -617,8 +691,11 @@ export function App() {
       }
 
       if (finalText) {
-        spokenTranscriptRef.current = finalText;
-        submitFinalAnswer(finalText);
+        const normalizedFinal = finalText.trim();
+        if (isCandidateText(normalizedFinal)) {
+          spokenTranscriptRef.current = normalizedFinal;
+          submitFinalAnswer(normalizedFinal);
+        }
         recognition.stop();
       }
     };
@@ -650,15 +727,18 @@ export function App() {
 
   function stopLiveAnswer() {
     if (!isRecording) return;
-    if (spokenTranscriptRef.current.trim()) {
-      submitFinalAnswer(spokenTranscriptRef.current.trim());
+    const spokenText = spokenTranscriptRef.current.trim();
+    if (isCandidateText(spokenText)) {
+      submitFinalAnswer(spokenText);
     } else if (pcmStreamingRef.current && runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "audio.stop" }));
       updateActiveTranscript("");
       updateVoiceStatus("本轮语音已提交，正在等待转写结果。");
       addEvent("audio.stop", "已提交阿里云实时语音识别本轮音频。");
     } else if (mediaRecorderRef.current) {
-      submitFinalAnswer("候选人已经通过麦克风完成回答。当前浏览器只上传了音频流，阿里云实时 ASR 接入后这里会显示真实转写。");
+      updateActiveTranscript("");
+      updateVoiceStatus("没有拿到可用的候选人转写文本，因此不会触发 LLM。请检查麦克风权限或切换 Chrome/Edge。");
+      addEvent("error", "NO_ASR_TEXT：没有可用候选人文本，已阻止 LLM 触发。");
     }
     recognitionRef.current?.stop();
     stopMediaRecorder();
@@ -795,7 +875,13 @@ export function App() {
 
   function submitFinalAnswer(text: string) {
     if (submittedSpeechRef.current) return;
+    if (!isCandidateText(text)) {
+      updateVoiceStatus("当前文本像系统状态，不会作为候选人回答发送给 LLM。");
+      addEvent("guard.blocked", "系统状态文本被拦截，未进入 LLM。");
+      return;
+    }
     submittedSpeechRef.current = true;
+    markTimeline("final_to_llm", "browser_final");
     spokenTranscriptRef.current = text;
     setLlmInput(text);
     updateActiveTranscript("");
@@ -913,6 +999,7 @@ export function App() {
     setAssistantMessages([]);
     setLatency({ stt: "-", llm: "-", tts: "-", total: "-", interrupt: "-" });
     setEvents([]);
+    resetTimeline();
   }
 
   function playAudioBase64(audioBase64: string) {
@@ -1027,6 +1114,21 @@ export function App() {
           <Metric label="TTS 首包" value={latency.tts} />
           <Metric label="端到端" value={latency.total} />
           <Metric label="打断" value={latency.interrupt} />
+        </div>
+        <div className="timeline-panel">
+          <div className="panel-title small">
+            <Send size={16} />
+            <span>本轮链路时间线</span>
+          </div>
+          <div className="timeline-list">
+            {timeline.map((item) => (
+              <div className={item.at === undefined ? "timeline-row" : "timeline-row done"} key={item.key}>
+                <strong>{item.label}</strong>
+                <span>{item.at === undefined ? "等待中" : `+${item.delta}ms`}</span>
+                <em>{item.source ?? "-"}</em>
+              </div>
+            ))}
+          </div>
         </div>
         <div className="event-log">
           <div className="panel-title small">
