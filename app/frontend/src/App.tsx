@@ -21,6 +21,7 @@ declare global {
   interface Window {
     SpeechRecognition?: new () => SpeechRecognitionLike;
     webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitAudioContext?: typeof AudioContext;
   }
 }
 
@@ -141,6 +142,9 @@ export function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const audioSeqRef = useRef(0);
   const activeTranscriptRef = useRef("");
   const submittedSpeechRef = useRef(false);
@@ -198,12 +202,47 @@ export function App() {
 
   async function blobToBase64(blob: Blob) {
     const buffer = await blob.arrayBuffer();
+    return arrayBufferToBase64(buffer);
+  }
+
+  function arrayBufferToBase64(buffer: ArrayBufferLike) {
     let binary = "";
     const bytes = new Uint8Array(buffer);
     bytes.forEach((byte) => {
       binary += String.fromCharCode(byte);
     });
     return window.btoa(binary);
+  }
+
+  function downsampleToPcm16(input: Float32Array, inputSampleRate: number, outputSampleRate: number) {
+    if (outputSampleRate >= inputSampleRate) {
+      return floatToPcm16(input);
+    }
+
+    const ratio = inputSampleRate / outputSampleRate;
+    const outputLength = Math.floor(input.length / ratio);
+    const output = new Float32Array(outputLength);
+
+    for (let index = 0; index < outputLength; index += 1) {
+      const start = Math.floor(index * ratio);
+      const end = Math.min(Math.floor((index + 1) * ratio), input.length);
+      let sum = 0;
+      for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+        sum += input[sampleIndex];
+      }
+      output[index] = sum / Math.max(end - start, 1);
+    }
+
+    return floatToPcm16(output);
+  }
+
+  function floatToPcm16(input: Float32Array) {
+    const pcm = new Int16Array(input.length);
+    for (let index = 0; index < input.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, input[index]));
+      pcm[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+    }
+    return pcm;
   }
 
   function sendAudioChunk(audioBase64: string, format: AudioFormat) {
@@ -426,7 +465,7 @@ export function App() {
 
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用真实麦克风音频流。");
+      addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用阿里云 PCM 音频流。");
       void startAudioChunkStreaming();
       return;
     }
@@ -508,6 +547,11 @@ export function App() {
   }
 
   async function startAudioChunkStreaming() {
+    if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
+      const startedPcm = await startPcmAudioStreaming();
+      if (startedPcm) return;
+    }
+
     if (!window.MediaRecorder) {
       setIsRecording(false);
       addEvent("audio.unsupported", "当前浏览器不支持 MediaRecorder，请使用 Chrome 或 Edge。");
@@ -550,11 +594,60 @@ export function App() {
     }
   }
 
+  async function startPcmAudioStreaming() {
+    const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
+    if (!AudioContextClass || !navigator.mediaDevices?.getUserMedia) {
+      return false;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioContext = new AudioContextClass();
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+      mediaStreamRef.current = stream;
+      audioContextRef.current = audioContext;
+      audioSourceRef.current = source;
+      audioProcessorRef.current = processor;
+      audioSeqRef.current = 0;
+      updateActiveTranscript("正在通过阿里云接收真实麦克风音频，请直接说话。");
+      addEvent("audio.pcm.start", "16k PCM 麦克风流已启动，发送到后端阿里云 ASR。");
+
+      processor.onaudioprocess = (audioEvent) => {
+        const input = audioEvent.inputBuffer.getChannelData(0);
+        const pcm = downsampleToPcm16(input, audioContext.sampleRate, 16000);
+        if (!pcm.byteLength) return;
+        sendAudioChunk(arrayBufferToBase64(pcm.buffer), {
+          codec: "pcm_s16le",
+          sample_rate: 16000,
+          channels: 1
+        });
+      };
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+      setIsRecording(true);
+      setMicState("granted");
+      return true;
+    } catch {
+      addEvent("audio.pcm.error", "阿里云 PCM 麦克风流未能启动，回退浏览器录音。");
+      stopMediaRecorder();
+      return false;
+    }
+  }
+
   function stopMediaRecorder() {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
     }
     mediaRecorderRef.current = null;
+    audioProcessorRef.current?.disconnect();
+    audioSourceRef.current?.disconnect();
+    void audioContextRef.current?.close();
+    audioProcessorRef.current = null;
+    audioSourceRef.current = null;
+    audioContextRef.current = null;
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
   }

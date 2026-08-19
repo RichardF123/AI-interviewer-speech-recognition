@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     aliyun_nls_app_key: str = ""
     aliyun_nls_token: str = ""
     aliyun_tts_voice: str = "zhixiaoxia"
-    aliyun_nls_endpoint: str = "wss://nls-gateway-ap-southeast-1.aliyuncs.com/ws/v1"
+    aliyun_nls_endpoint: str = "wss://nls-gateway.cn-shanghai.aliyuncs.com/ws/v1"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

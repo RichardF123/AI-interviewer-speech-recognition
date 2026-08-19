@@ -47,7 +47,7 @@ class AliyunNlsClient:
             }
         ).encode("utf-8")
         request = Request(
-            "https://nls-gateway-ap-southeast-1.aliyuncs.com/stream/v1/tts",
+            "https://nls-gateway.cn-shanghai.aliyuncs.com/stream/v1/tts",
             data=payload,
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
@@ -67,7 +67,7 @@ class AliyunNlsClient:
             "AccessKeyId": settings.aliyun_access_key_id,
             "Action": "CreateToken",
             "Format": "JSON",
-            "RegionId": "ap-southeast-1",
+            "RegionId": "cn-shanghai",
             "SignatureMethod": "HMAC-SHA1",
             "SignatureNonce": str(uuid4()),
             "SignatureVersion": "1.0",
@@ -86,7 +86,7 @@ class AliyunNlsClient:
         ).digest()
         signature = base64.b64encode(digest).decode("utf-8")
         query = f"Signature={self._percent_encode(signature)}&{canonicalized}"
-        request = Request(f"https://nlsmeta.ap-southeast-1.aliyuncs.com/?{query}", method="GET")
+        request = Request(f"https://nls-meta.cn-shanghai.aliyuncs.com/?{query}", method="GET")
         with urlopen(request, timeout=20) as response:
             data = json.loads(response.read().decode("utf-8"))
         token = data["Token"]["Id"]

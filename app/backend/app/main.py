@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from typing import Optional
 from uuid import uuid4
 
@@ -6,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.aliyun_asr import AliyunRealtimeTranscriber
 from app.mock_services import TurnMetrics, mock_orchestrator, mock_stt, mock_tts
 from app.schemas import (
     CreateInterviewSessionRequest,
@@ -96,6 +98,47 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
     )
 
     current_tts_task: Optional[asyncio.Task] = None
+    aliyun_asr: Optional[AliyunRealtimeTranscriber] = None
+    asr_event_task: Optional[asyncio.Task] = None
+
+    async def handle_final_transcript(final_text: str) -> None:
+        nonlocal current_tts_task
+
+        metrics = TurnMetrics()
+        turn_id = f"t_{uuid4().hex[:8]}"
+        session.current_turn_id = turn_id
+        session.interrupted_turn_ids.discard(turn_id)
+
+        assistant_text = await mock_orchestrator.respond_to_final_transcript(final_text)
+        await websocket.send_json(event("assistant.text", turn_id=turn_id, text=assistant_text))
+
+        if current_tts_task and not current_tts_task.done():
+            current_tts_task.cancel()
+        current_tts_task = asyncio.create_task(
+            run_tts_turn(websocket, session, turn_id, assistant_text, metrics)
+        )
+
+    async def forward_asr_events() -> None:
+        if not aliyun_asr:
+            return
+        while True:
+            asr_event = await aliyun_asr.events.get()
+            await websocket.send_json(asr_event)
+            if asr_event.get("type") == "stt.final":
+                await handle_final_transcript(asr_event.get("text", ""))
+
+    if session.stt_provider == "aliyun":
+        try:
+            aliyun_asr = AliyunRealtimeTranscriber(asyncio.get_running_loop())
+            if aliyun_asr.start():
+                asr_event_task = asyncio.create_task(forward_asr_events())
+                await websocket.send_json(event("asr.ready", provider="aliyun", format="pcm_s16le", sample_rate=16000))
+            else:
+                aliyun_asr = None
+                await websocket.send_json(event("asr.fallback", provider="mock", reason="阿里云 ASR 未配置 token/appkey"))
+        except Exception as exc:
+            aliyun_asr = None
+            await websocket.send_json(event("asr.fallback", provider="mock", reason=str(exc)))
 
     try:
         while True:
@@ -107,6 +150,10 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 continue
 
             if incoming.type == "audio.chunk":
+                codec = (incoming.format or {}).get("codec")
+                if aliyun_asr and codec == "pcm_s16le" and incoming.audio_base64:
+                    aliyun_asr.send_audio(base64.b64decode(incoming.audio_base64))
+                    continue
                 await websocket.send_json(mock_stt.partial_from_audio_chunk(incoming.seq))
                 continue
 
@@ -123,24 +170,11 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 continue
 
             if incoming.type == "demo.answer_complete":
-                metrics = TurnMetrics()
                 stt_final = mock_stt.final_from_demo_answer(incoming.text)
                 await websocket.send_json(stt_final)
 
                 # 关键边界：只有 stt.final 的稳定文本进入 orchestrator；partial 不进入 LLM。
-                final_text = stt_final["text"]
-                turn_id = f"t_{uuid4().hex[:8]}"
-                session.current_turn_id = turn_id
-                session.interrupted_turn_ids.discard(turn_id)
-
-                assistant_text = await mock_orchestrator.respond_to_final_transcript(final_text)
-                await websocket.send_json(event("assistant.text", turn_id=turn_id, text=assistant_text))
-
-                if current_tts_task and not current_tts_task.done():
-                    current_tts_task.cancel()
-                current_tts_task = asyncio.create_task(
-                    run_tts_turn(websocket, session, turn_id, assistant_text, metrics)
-                )
+                await handle_final_transcript(stt_final["text"])
                 continue
 
             if incoming.type == "control.interrupt":
@@ -178,5 +212,13 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
     except WebSocketDisconnect:
         if current_tts_task and not current_tts_task.done():
             current_tts_task.cancel()
+        if asr_event_task and not asr_event_task.done():
+            asr_event_task.cancel()
+        if aliyun_asr:
+            aliyun_asr.stop()
     except Exception as exc:
         await websocket.send_json(event("error", code="INTERNAL_ERROR", message=str(exc)))
+        if asr_event_task and not asr_event_task.done():
+            asr_event_task.cancel()
+        if aliyun_asr:
+            aliyun_asr.stop()
