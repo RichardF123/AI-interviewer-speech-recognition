@@ -136,6 +136,7 @@ export function App() {
     interrupt: "-"
   });
   const wsRef = useRef<WebSocket | null>(null);
+  const sessionStateRef = useRef<SessionState>("idle");
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -143,6 +144,7 @@ export function App() {
   const audioSeqRef = useRef(0);
   const activeTranscriptRef = useRef("");
   const submittedSpeechRef = useRef(false);
+  const pendingAutoRecordRef = useRef(false);
   const timers = useRef<number[]>([]);
 
   const steps = useMemo(
@@ -165,6 +167,10 @@ export function App() {
     ] satisfies Array<{ title: string; detail: string; state: StepState }>,
     [assistantMessages.length, isPlaying, isRecording, runtimeMode, sessionState, transcripts]
   );
+
+  useEffect(() => {
+    sessionStateRef.current = sessionState;
+  }, [sessionState]);
 
   useEffect(() => {
     return () => {
@@ -239,6 +245,7 @@ export function App() {
 
   async function startInterview() {
     resetRuntime();
+    sessionStateRef.current = "connecting";
     setSessionState("connecting");
     await requestMicPermission();
 
@@ -268,9 +275,11 @@ export function App() {
       connectWebSocket(session.websocket_url);
     } catch (error) {
       setRuntimeMode("local");
+      sessionStateRef.current = "active";
       setSessionState("active");
       addEvent("backend.fallback", `后端不可用，使用本地模式。${String(error)}`);
       playOpeningMessage();
+      startPendingVoiceCapture();
     }
   }
 
@@ -280,9 +289,11 @@ export function App() {
 
     socket.onopen = () => {
       setRuntimeMode("backend");
+      sessionStateRef.current = "active";
       setSessionState("active");
       addEvent("ws.open", "后端 WebSocket 已连接。");
       playOpeningMessage();
+      startPendingVoiceCapture();
     };
 
     socket.onmessage = (message) => {
@@ -374,13 +385,42 @@ export function App() {
     }
   }
 
+  async function handleVoiceButton() {
+    if (isRecording) {
+      stopLiveAnswer();
+      return;
+    }
+
+    const currentSessionState = sessionStateRef.current;
+    addEvent("voice.click", currentSessionState === "active" ? "正在启动实时回答。" : "正在先启动面试，再打开麦克风。");
+    updateActiveTranscript("正在启动麦克风，请在浏览器提示中允许权限。");
+
+    if (currentSessionState !== "active") {
+      pendingAutoRecordRef.current = true;
+      await startInterview();
+      return;
+    }
+
+    startLiveAnswer();
+  }
+
+  function startPendingVoiceCapture() {
+    if (!pendingAutoRecordRef.current) return;
+    pendingAutoRecordRef.current = false;
+    schedule(() => startLiveAnswer(), 350);
+  }
+
   function startLiveAnswer() {
-    if (sessionState !== "active") return;
+    if (sessionStateRef.current !== "active") {
+      pendingAutoRecordRef.current = true;
+      addEvent("voice.waiting", "会话就绪后会自动打开麦克风。");
+      return;
+    }
 
     clearTimers();
     setIsRecording(true);
     setIsPlaying(false);
-    updateActiveTranscript("");
+    updateActiveTranscript("正在启动麦克风，请在浏览器提示中允许权限。");
     setTranscripts([]);
     submittedSpeechRef.current = false;
 
@@ -399,6 +439,7 @@ export function App() {
     recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
+      updateActiveTranscript("正在实时收听，请直接说话。");
       addEvent("speech.start", "开始实时收听，请直接说话。");
     };
 
@@ -448,6 +489,7 @@ export function App() {
     try {
       recognition.start();
     } catch {
+      updateActiveTranscript("浏览器语音识别未能启动，正在改用真实麦克风音频流。");
       addEvent("speech.error", "浏览器语音识别未能启动，改用真实麦克风音频流。");
       void startAudioChunkStreaming();
     }
@@ -601,6 +643,8 @@ export function App() {
     stopMediaRecorder();
     audioRef.current?.pause();
     wsRef.current?.close();
+    pendingAutoRecordRef.current = false;
+    sessionStateRef.current = "ended";
     setSessionState("ended");
     setIsRecording(false);
     setIsPlaying(false);
@@ -644,13 +688,14 @@ export function App() {
 
   function resetDemo() {
     resetRuntime();
+    pendingAutoRecordRef.current = false;
+    sessionStateRef.current = "idle";
     setSessionState("idle");
     setMicState("unknown");
   }
 
   const finalTranscript = transcripts.find((item) => item.kind === "final");
   const latestAssistant = assistantMessages[assistantMessages.length - 1];
-  const canAnswer = sessionState === "active" && !isRecording;
 
   return (
     <main className="shell">
@@ -715,9 +760,9 @@ export function App() {
           <Play size={18} />
           开始面试
         </button>
-        <button className="plain-button" type="button" onClick={isRecording ? stopLiveAnswer : startLiveAnswer} disabled={sessionState !== "active"}>
+        <button className="plain-button" type="button" onClick={handleVoiceButton} disabled={sessionState === "connecting"}>
           <Mic size={18} />
-          {isRecording ? "结束回答" : "实时回答"}
+          {isRecording ? "结束回答" : sessionState === "active" ? "实时回答" : "实时回答并开始"}
         </button>
         <button className="plain-button danger" type="button" onClick={interruptPlayback} disabled={!isPlaying && !isRecording}>
           <CircleStop size={18} />
