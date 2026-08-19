@@ -84,7 +84,7 @@ export function App() {
   const [micState, setMicState] = useState<MicState>("unknown");
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("local");
   const [sessionId, setSessionId] = useState("-");
-  const [providerInfo, setProviderInfo] = useState("aliyun STT / deepseek LLM / mock TTS");
+  const [providerInfo, setProviderInfo] = useState("aliyun STT / deepseek LLM / aliyun TTS");
   const [isRecording, setIsRecording] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [activeTranscript, setActiveTranscript] = useState("");
@@ -177,7 +177,7 @@ export function App() {
           language: "zh-CN",
           stt_provider: "aliyun",
           llm_provider: "deepseek",
-          tts_provider: "mock",
+          tts_provider: "aliyun",
           voice_profile: "professional_warm_female",
           enable_recording: false
         })
@@ -384,7 +384,7 @@ export function App() {
     wsRef.current?.close();
     setRuntimeMode("local");
     setSessionId("-");
-    setProviderInfo("aliyun STT / deepseek LLM / mock TTS");
+    setProviderInfo("aliyun STT / deepseek LLM / aliyun TTS");
     setIsRecording(false);
     setIsPlaying(false);
     setActiveTranscript("");
