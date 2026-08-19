@@ -71,6 +71,8 @@ async def provider_status() -> dict:
             "configured": bool(settings.mimo_api_key),
             "model": settings.mimo_asr_model,
             "mode": "segment_wav_base64",
+            "supports_partial": False,
+            "supports_streaming_audio": False,
         },
     }
 
@@ -326,7 +328,7 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
                 )
                 continue
 
-            if incoming.type == "demo.answer_complete":
+            if incoming.type in ("demo.answer_complete", "speech.final"):
                 stt_final = mock_stt.final_from_demo_answer(incoming.text)
                 await websocket.send_json(stt_final)
 

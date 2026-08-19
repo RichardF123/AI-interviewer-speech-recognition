@@ -203,7 +203,7 @@ export function App() {
     () => [
       {
         title: "开始面试",
-        detail: runtimeMode === "backend" ? "已连接后端 mock 服务" : "可本地模拟",
+        detail: runtimeMode === "backend" ? "电话链路已连接" : "可本地模拟",
         state: sessionState === "idle" || sessionState === "ended" ? "idle" : "done"
       },
       {
@@ -371,7 +371,7 @@ export function App() {
     if (noTextTimerRef.current) return;
     noTextTimerRef.current = window.setTimeout(() => {
       if (!spokenTranscriptRef.current.trim() && isRecordingRef.current) {
-        updateVoiceStatus("已检测到麦克风输入，但 1.5 秒内没有识别文字；请检查阿里云实时 ASR 权限，或用 Chrome/Edge 打开本页。");
+        updateVoiceStatus("已检测到麦克风输入，但 1.5 秒内没有识别文字；请用 Chrome/Edge，或等待后端 MiMo 段式 ASR 备份。");
         addEvent("asr.slow", "已收到声音，但 ASR 尚未返回文字。");
       }
       noTextTimerRef.current = null;
@@ -381,9 +381,9 @@ export function App() {
   function startAutoStopWatchdog() {
     if (autoStopTimerRef.current) return;
     autoStopTimerRef.current = window.setInterval(() => {
-      if (!pcmStreamingRef.current || spokenTranscriptRef.current.trim()) return;
+      if (!pcmStreamingRef.current || !lastVoiceAtRef.current) return;
       if (lastVoiceAtRef.current && Date.now() - lastVoiceAtRef.current > 1200) {
-        updateVoiceStatus("检测到停顿，正在提交本轮语音。");
+        updateVoiceStatus("检测到停顿，正在提交本轮回答。");
         stopLiveAnswer();
       }
     }, 250);
@@ -410,6 +410,7 @@ export function App() {
 
   async function startInterview() {
     resetRuntime();
+    pendingAutoRecordRef.current = true;
     sessionStateRef.current = "connecting";
     setSessionState("connecting");
     await requestMicPermission();
@@ -444,7 +445,6 @@ export function App() {
       setSessionState("active");
       addEvent("backend.fallback", `后端不可用，使用本地模式。${String(error)}`);
       playOpeningMessage();
-      startPendingVoiceCapture();
     }
   }
 
@@ -458,7 +458,6 @@ export function App() {
       setSessionState("active");
       addEvent("ws.open", "后端 WebSocket 已连接。");
       playOpeningMessage();
-      startPendingVoiceCapture();
     };
 
     socket.onmessage = (message) => {
@@ -479,6 +478,7 @@ export function App() {
     schedule(() => {
       setIsPlaying(false);
       addEvent("tts.done", "开场白播放完成。");
+      startPendingVoiceCapture();
     }, 1800);
   }
 
@@ -489,20 +489,20 @@ export function App() {
     }
 
     if (serverEvent.type === "asr.ready") {
-      updateVoiceStatus("阿里云实时语音识别已就绪，请直接说话。");
-      addEvent("asr.ready", "阿里云实时语音识别已就绪。");
+      updateVoiceStatus("实时语音链路已就绪，请像电话一样直接说话。");
+      addEvent("asr.ready", "实时语音链路已就绪。");
       return;
     }
 
     if (serverEvent.type === "asr.fallback") {
-      updateVoiceStatus("阿里云实时识别不可用，请检查项目权限或浏览器麦克风。");
-      addEvent("asr.fallback", serverEvent.message ?? "阿里云实时识别不可用，后端将使用兜底链路。");
+      updateVoiceStatus("后端语音备份不可用，请检查项目权限或浏览器麦克风。");
+      addEvent("asr.fallback", serverEvent.message ?? "后端语音备份不可用，浏览器实时字幕仍会优先工作。");
       return;
     }
 
     if (serverEvent.type === "audio.received") {
       if (!spokenTranscriptRef.current.trim()) {
-        updateVoiceStatus(`已接收真实麦克风音频 ${serverEvent.chunks ?? ""} 个分片，正在等待阿里云返回文字。`);
+        updateVoiceStatus(`已接收真实麦克风音频 ${serverEvent.chunks ?? ""} 个分片，当前为分段识别模式。`);
       }
       addEvent("audio.received", serverEvent.message ?? "后端已收到真实麦克风音频。");
       return;
@@ -567,6 +567,8 @@ export function App() {
       ) {
         browserTtsFallbackUsedRef.current = true;
         speakBrowserTts(pendingTtsTextRef.current);
+      } else if (serverEvent.status === "tts_completed" || serverEvent.status === "cancelled") {
+        restartListeningAfterAssistant();
       }
       addEvent("tts.audio", `TTS 状态：${serverEvent.status ?? "streaming"}`);
       return;
@@ -600,36 +602,40 @@ export function App() {
     }
   }
 
-  async function handleVoiceButton() {
-    if (isRecording) {
-      stopLiveAnswer();
+  function toggleMute() {
+    if (sessionStateRef.current !== "active") return;
+    if (isRecordingRef.current) {
+      recognitionRef.current?.abort();
+      stopMediaRecorder();
+      setIsRecording(false);
+      isRecordingRef.current = false;
+      clearVoiceTimers();
+      updateActiveTranscript("");
+      spokenTranscriptRef.current = "";
+      submittedSpeechRef.current = false;
+      updateVoiceStatus("已静音。点击恢复聆听后继续像电话一样对话。");
+      addEvent("voice.muted", "电话模式已静音。");
       return;
     }
-
-    const currentSessionState = sessionStateRef.current;
-    addEvent("voice.click", currentSessionState === "active" ? "正在启动实时回答。" : "正在先启动面试，再打开麦克风。");
-    updateActiveTranscript("");
-    updateVoiceStatus("正在启动麦克风，请在浏览器提示中允许权限。");
-
-    if (currentSessionState !== "active") {
-      pendingAutoRecordRef.current = true;
-      await startInterview();
-      return;
-    }
-
+    updateVoiceStatus("正在恢复聆听。");
     startLiveAnswer();
   }
 
   function startPendingVoiceCapture() {
     if (!pendingAutoRecordRef.current) return;
     pendingAutoRecordRef.current = false;
-    schedule(() => startLiveAnswer(), 350);
+    schedule(() => startLiveAnswer(), isPlaying ? 900 : 250);
   }
 
   function startLiveAnswer() {
     if (sessionStateRef.current !== "active") {
       pendingAutoRecordRef.current = true;
       addEvent("voice.waiting", "会话就绪后会自动打开麦克风。");
+      return;
+    }
+    if (isPlaying) {
+      pendingAutoRecordRef.current = true;
+      addEvent("voice.waiting", "等待面试官语音播放结束后自动收听。");
       return;
     }
 
@@ -651,8 +657,8 @@ export function App() {
 
     const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      updateVoiceStatus("当前浏览器不支持本地实时字幕；正在使用阿里云实时识别，若无文字返回请检查阿里云项目权限。");
-      addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用阿里云 PCM 音频流。");
+      updateVoiceStatus("当前浏览器不支持本地实时字幕；正在使用后端音频段转写。");
+      addEvent("speech.unsupported", "当前浏览器不支持文字级识别，改用后端音频段转写。");
       if (runtimeMode !== "backend") {
         void startAudioChunkStreaming();
       }
@@ -709,7 +715,7 @@ export function App() {
     };
 
     recognition.onerror = (event) => {
-      updateVoiceStatus("浏览器本地语音识别不可用，正在使用阿里云实时识别。");
+      updateVoiceStatus("浏览器本地语音识别不可用，正在使用后端音频段转写。");
       addEvent("speech.error", `浏览器文字识别失败：${event.error ?? "unknown"}，改用真实麦克风音频流。`);
       recognition.abort();
       void startAudioChunkStreaming();
@@ -727,7 +733,7 @@ export function App() {
     try {
       recognition.start();
     } catch {
-      updateVoiceStatus("浏览器语音识别未能启动；正在改用阿里云实时识别。");
+      updateVoiceStatus("浏览器语音识别未能启动；正在改用后端音频段转写。");
       addEvent("speech.error", "浏览器语音识别未能启动，改用真实麦克风音频流。");
       void startAudioChunkStreaming();
     }
@@ -742,7 +748,7 @@ export function App() {
       wsRef.current.send(JSON.stringify({ type: "audio.stop" }));
       updateActiveTranscript("");
       updateVoiceStatus("本轮语音已提交，正在等待转写结果。");
-      addEvent("audio.stop", "已提交阿里云实时语音识别本轮音频。");
+      addEvent("audio.stop", "已提交后端音频段转写本轮音频。");
     } else if (mediaRecorderRef.current) {
       updateActiveTranscript("");
       updateVoiceStatus("没有拿到可用的候选人转写文本，因此不会触发 LLM。请检查麦克风权限或切换 Chrome/Edge。");
@@ -777,7 +783,7 @@ export function App() {
         : "audio/webm";
       const recorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = recorder;
-      updateVoiceStatus("正在接收真实麦克风音频。请说话，点击“结束回答”后提交本轮回答。");
+      updateVoiceStatus("正在接收真实麦克风音频。当前为分段识别模式，停顿后自动提交。");
       addEvent("audio.start", "真实麦克风音频流已启动。");
 
       recorder.ondataavailable = (event) => {
@@ -827,8 +833,8 @@ export function App() {
       audioSeqRef.current = 0;
       firstAudioAtRef.current = Date.now();
       lastVoiceAtRef.current = 0;
-      updateVoiceStatus("正在通过阿里云接收真实麦克风音频，请直接说话。");
-      addEvent("audio.pcm.start", "16k PCM 麦克风流已启动，发送到后端阿里云 ASR。");
+      updateVoiceStatus("电话模式正在聆听，请直接说话。浏览器字幕实时显示，后端 MiMo 作为分段兜底。");
+      addEvent("audio.pcm.start", "16k PCM 麦克风流已启动，发送到后端分段 ASR 兜底。");
       startNoTextWatchdog();
       startAutoStopWatchdog();
 
@@ -859,7 +865,7 @@ export function App() {
       setMicState("granted");
       return true;
     } catch {
-      addEvent("audio.pcm.error", "阿里云 PCM 麦克风流未能启动，回退浏览器录音。");
+      addEvent("audio.pcm.error", "PCM 麦克风流未能启动，回退浏览器录音。");
       stopMediaRecorder();
       return false;
     }
@@ -895,6 +901,7 @@ export function App() {
     updateActiveTranscript("");
     setIsRecording(false);
     isRecordingRef.current = false;
+    stopMediaRecorder();
     clearVoiceTimers();
     setTranscripts((items) => [
       ...items.filter((item) => item.kind !== "partial"),
@@ -903,7 +910,7 @@ export function App() {
     addEvent("stt.final", "实时回答已形成 final 文本。");
 
     if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "demo.answer_complete", text }));
+      wsRef.current.send(JSON.stringify({ type: "speech.final", text }));
       return;
     }
 
@@ -1019,20 +1026,30 @@ export function App() {
     const audio = new Audio(`data:audio/mpeg;base64,${audioBase64}`);
     audioRef.current = audio;
     setIsPlaying(true);
-    audio.onended = () => setIsPlaying(false);
+    audio.onended = () => {
+      setIsPlaying(false);
+      restartListeningAfterAssistant();
+    };
     audio.onerror = () => {
       setIsPlaying(false);
       addEvent("tts.error", "浏览器播放 TTS 音频失败。");
+      restartListeningAfterAssistant();
     };
     void audio.play().catch(() => {
       setIsPlaying(false);
       addEvent("tts.blocked", "浏览器阻止自动播放，请再次点击页面后重试。");
+      if (pendingTtsTextRef.current) {
+        speakBrowserTts(pendingTtsTextRef.current);
+      } else {
+        restartListeningAfterAssistant();
+      }
     });
   }
 
   function speakBrowserTts(text: string) {
     if (!("speechSynthesis" in window) || !text.trim()) {
       setIsPlaying(false);
+      restartListeningAfterAssistant();
       return;
     }
     window.speechSynthesis.cancel();
@@ -1041,10 +1058,22 @@ export function App() {
     utterance.rate = 0.96;
     utterance.pitch = 1.02;
     utterance.volume = 1;
-    utterance.onend = () => setIsPlaying(false);
-    utterance.onerror = () => setIsPlaying(false);
+    utterance.onend = () => {
+      setIsPlaying(false);
+      restartListeningAfterAssistant();
+    };
+    utterance.onerror = () => {
+      setIsPlaying(false);
+      restartListeningAfterAssistant();
+    };
     setIsPlaying(true);
     window.speechSynthesis.speak(utterance);
+  }
+
+  function restartListeningAfterAssistant() {
+    if (sessionStateRef.current !== "active" || isRecordingRef.current) return;
+    pendingAutoRecordRef.current = true;
+    startPendingVoiceCapture();
   }
 
   function resetDemo() {
@@ -1063,8 +1092,8 @@ export function App() {
       <header className="header">
         <div>
           <p className="kicker">AI Interviewer Voice Demo</p>
-          <h1>三步跑通 AI 面试语音链路</h1>
-          <p className="lead">开始面试，直接说话，查看实时转写、AI 追问、播放和打断。</p>
+          <h1>电话式 AI 面试语音链路</h1>
+          <p className="lead">点击开始后自动开麦，像电话一样连续对话，实时显示转写并自动播放 AI 回复。</p>
         </div>
         <button className="ghost-button" type="button" onClick={resetDemo}>
           <RotateCcw size={17} />
@@ -1099,7 +1128,7 @@ export function App() {
             <span>{isPlaying ? "面试官正在播放" : "AI 面试官输出"}</span>
           </div>
           <div className={isPlaying ? "speech-box playing" : "speech-box"}>
-            {latestAssistant?.text || "点击“开始面试”后，面试官会先开场。候选人 final 文本生成后，这里会出现追问。"}
+            {latestAssistant?.text || "点击“开始面试”后，面试官会先开场；之后系统会自动进入聆听。"}
           </div>
           <p className="hint">输出区只展示面试官要说的话；真实 TTS 可用时会直接播放语音。</p>
         </section>
@@ -1110,7 +1139,7 @@ export function App() {
             <span>{isRecording ? "正在听候选人回答" : "候选人语音输入"}</span>
           </div>
           <div className={isRecording ? "speech-box listening" : "speech-box"}>
-            {activeTranscript || finalTranscript?.text || voiceStatus || "点击下方“实时回答”，允许麦克风权限后直接说话。这里只会显示候选人转写或识别状态。"}
+            {activeTranscript || finalTranscript?.text || voiceStatus || "点击“开始面试”后允许麦克风权限，然后直接说话。这里不会显示系统状态作为候选人回答。"}
           </div>
           {llmInput && <p className="hint">发送给 LLM：{llmInput}</p>}
           <p className="hint">规则：partial 只展示给用户，final 才会进入 AI 面试官理解和追问。</p>
@@ -1122,9 +1151,9 @@ export function App() {
           <Play size={18} />
           开始面试
         </button>
-        <button className="plain-button" type="button" onClick={handleVoiceButton} disabled={sessionState === "connecting"}>
-          <Mic size={18} />
-          {isRecording ? "结束回答" : sessionState === "active" ? "实时回答" : "实时回答并开始"}
+        <button className="plain-button" type="button" onClick={toggleMute} disabled={sessionState !== "active"}>
+          {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
+          {isRecording ? "静音" : "恢复聆听"}
         </button>
         <button className="plain-button danger" type="button" onClick={interruptPlayback} disabled={!isPlaying && !isRecording}>
           <CircleStop size={18} />
