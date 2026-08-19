@@ -17,6 +17,35 @@ type MicState = "unknown" | "checking" | "granted" | "simulated";
 type RuntimeMode = "backend" | "local";
 type StepState = "idle" | "active" | "done";
 
+declare global {
+  interface Window {
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+  }
+}
+
+interface SpeechRecognitionLike {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onstart: (() => void) | null;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+}
+
+interface SpeechRecognitionEventLike {
+  resultIndex: number;
+  results: ArrayLike<{
+    isFinal: boolean;
+    0: { transcript: string };
+  }>;
+}
+
 interface TranscriptItem {
   id: string;
   kind: "partial" | "final";
@@ -99,6 +128,9 @@ export function App() {
     interrupt: "-"
   });
   const wsRef = useRef<WebSocket | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const activeTranscriptRef = useRef("");
+  const submittedSpeechRef = useRef(false);
   const timers = useRef<number[]>([]);
 
   const steps = useMemo(
@@ -125,6 +157,7 @@ export function App() {
   useEffect(() => {
     return () => {
       clearTimers();
+      recognitionRef.current?.abort();
       wsRef.current?.close();
     };
   }, []);
@@ -141,6 +174,11 @@ export function App() {
 
   function addEvent(type: string, text: string) {
     setEvents((items) => [{ id: makeId("evt"), time: nowTime(), type, text }, ...items].slice(0, 6));
+  }
+
+  function updateActiveTranscript(text: string) {
+    activeTranscriptRef.current = text;
+    setActiveTranscript(text);
   }
 
   async function requestMicPermission() {
@@ -239,7 +277,7 @@ export function App() {
 
     if (serverEvent.type === "stt.partial") {
       setIsRecording(true);
-      setActiveTranscript(serverEvent.text ?? "");
+      updateActiveTranscript(serverEvent.text ?? "");
       setTranscripts((items) => [
         ...items.filter((item) => item.kind !== "partial"),
         { id: makeId("stt"), kind: "partial", text: serverEvent.text ?? "", time: nowTime() }
@@ -250,7 +288,7 @@ export function App() {
 
     if (serverEvent.type === "stt.final") {
       setIsRecording(false);
-      setActiveTranscript("");
+      updateActiveTranscript("");
       setTranscripts((items) => [
         ...items.filter((item) => item.kind !== "partial"),
         { id: makeId("stt"), kind: "final", text: serverEvent.text ?? "", time: nowTime() }
@@ -296,24 +334,108 @@ export function App() {
     }
   }
 
-  function simulateAnswer() {
+  function startLiveAnswer() {
     if (sessionState !== "active") return;
 
     clearTimers();
     setIsRecording(true);
     setIsPlaying(false);
-    setActiveTranscript("");
+    updateActiveTranscript("");
     setTranscripts([]);
+    submittedSpeechRef.current = false;
 
-    if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "demo.answer_start", text: "我负责候选人匹配模块" }));
-      schedule(() => {
-        wsRef.current?.send(JSON.stringify({ type: "demo.answer_complete", text: demoAnswer }));
-      }, 900);
+    const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      addEvent("speech.unsupported", "当前浏览器不支持实时语音识别，已切回模拟回答。");
+      runLocalAnswerSimulation();
       return;
     }
 
-    runLocalAnswerSimulation();
+    const recognition = new SpeechRecognition();
+    recognitionRef.current = recognition;
+    recognition.lang = "zh-CN";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      addEvent("speech.start", "开始实时收听，请直接说话。");
+    };
+
+    recognition.onresult = (event) => {
+      let interimText = "";
+      let finalText = "";
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const text = result[0]?.transcript.trim() ?? "";
+        if (!text) continue;
+        if (result.isFinal) {
+          finalText += text;
+        } else {
+          interimText += text;
+        }
+      }
+
+      if (interimText) {
+        updateActiveTranscript(interimText);
+        setTranscripts((items) => [
+          ...items.filter((item) => item.kind !== "partial"),
+          { id: makeId("stt"), kind: "partial", text: interimText, time: nowTime() }
+        ]);
+        addEvent("stt.partial", "浏览器实时字幕更新。");
+      }
+
+      if (finalText) {
+        submitFinalAnswer(finalText);
+        recognition.stop();
+      }
+    };
+
+    recognition.onerror = (event) => {
+      setIsRecording(false);
+      addEvent("speech.error", `实时语音识别失败：${event.error ?? "unknown"}`);
+    };
+
+    recognition.onend = () => {
+      setIsRecording(false);
+      if (!submittedSpeechRef.current && activeTranscriptRef.current.trim()) {
+        submitFinalAnswer(activeTranscriptRef.current.trim());
+      }
+    };
+
+    recognition.start();
+  }
+
+  function stopLiveAnswer() {
+    if (!isRecording) return;
+    if (activeTranscriptRef.current.trim()) {
+      submitFinalAnswer(activeTranscriptRef.current.trim());
+    }
+    recognitionRef.current?.stop();
+    setIsRecording(false);
+  }
+
+  function submitFinalAnswer(text: string) {
+    if (submittedSpeechRef.current) return;
+    submittedSpeechRef.current = true;
+    updateActiveTranscript("");
+    setIsRecording(false);
+    setTranscripts((items) => [
+      ...items.filter((item) => item.kind !== "partial"),
+      { id: makeId("stt"), kind: "final", text, time: nowTime() }
+    ]);
+    addEvent("stt.final", "实时回答已形成 final 文本。");
+
+    if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "demo.answer_complete", text }));
+      return;
+    }
+
+    setAssistantMessages((items) => [...items, { id: makeId("msg"), text: localFollowUp, time: nowTime() }]);
+    setLatency({ stt: "实时", llm: "530ms", tts: "680ms", total: "2.39s", interrupt: "-" });
+    setIsPlaying(true);
+    schedule(() => setIsPlaying(false), 2500);
   }
 
   function runLocalAnswerSimulation() {
@@ -324,7 +446,7 @@ export function App() {
 
     partials.forEach((text, index) => {
       schedule(() => {
-        setActiveTranscript(text);
+        updateActiveTranscript(text);
         setTranscripts((items) => [
           ...items.filter((item) => item.kind !== "partial"),
           { id: makeId("stt"), kind: "partial", text, time: nowTime() }
@@ -335,7 +457,7 @@ export function App() {
 
     schedule(() => {
       setIsRecording(false);
-      setActiveTranscript("");
+      updateActiveTranscript("");
       setTranscripts((items) => [
         ...items.filter((item) => item.kind !== "partial"),
         { id: makeId("stt"), kind: "final", text: demoAnswer, time: nowTime() }
@@ -358,6 +480,7 @@ export function App() {
 
   function interruptPlayback() {
     clearTimers();
+    recognitionRef.current?.abort();
     setIsPlaying(false);
     setIsRecording(false);
     if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
@@ -371,23 +494,25 @@ export function App() {
 
   function endInterview() {
     clearTimers();
+    recognitionRef.current?.abort();
     wsRef.current?.close();
     setSessionState("ended");
     setIsRecording(false);
     setIsPlaying(false);
-    setActiveTranscript("");
+    updateActiveTranscript("");
     addEvent("session.ended", "面试已结束。");
   }
 
   function resetRuntime() {
     clearTimers();
+    recognitionRef.current?.abort();
     wsRef.current?.close();
     setRuntimeMode("local");
     setSessionId("-");
     setProviderInfo("aliyun STT / deepseek LLM / aliyun TTS");
     setIsRecording(false);
     setIsPlaying(false);
-    setActiveTranscript("");
+    updateActiveTranscript("");
     setTranscripts([]);
     setAssistantMessages([]);
     setLatency({ stt: "-", llm: "-", tts: "-", total: "-", interrupt: "-" });
@@ -410,7 +535,7 @@ export function App() {
         <div>
           <p className="kicker">AI Interviewer Voice Demo</p>
           <h1>三步跑通 AI 面试语音链路</h1>
-          <p className="lead">开始面试，模拟候选人回答，查看转写、追问、播放和打断。</p>
+          <p className="lead">开始面试，直接说话，查看实时转写、AI 追问、播放和打断。</p>
         </div>
         <button className="ghost-button" type="button" onClick={resetDemo}>
           <RotateCcw size={17} />
@@ -430,9 +555,9 @@ export function App() {
           <Play size={18} />
           开始面试
         </button>
-        <button className="plain-button" type="button" onClick={simulateAnswer} disabled={!canAnswer}>
+        <button className="plain-button" type="button" onClick={isRecording ? stopLiveAnswer : startLiveAnswer} disabled={sessionState !== "active"}>
           <Mic size={18} />
-          模拟回答
+          {isRecording ? "结束回答" : "实时回答"}
         </button>
         <button className="plain-button danger" type="button" onClick={interruptPlayback} disabled={!isPlaying && !isRecording}>
           <CircleStop size={18} />
@@ -464,7 +589,7 @@ export function App() {
             <span>{isRecording ? "正在听候选人回答" : "候选人回答区"}</span>
           </div>
           <div className={isRecording ? "speech-box listening" : "speech-box"}>
-            {activeTranscript || finalTranscript?.text || "点击“模拟回答”，这里会先显示实时 partial，随后变成 final 文本。"}
+            {activeTranscript || finalTranscript?.text || "点击“实时回答”，允许麦克风权限后直接说话。这里会先显示实时字幕，结束后形成 final 文本。"}
           </div>
           <p className="hint">规则：partial 只展示给用户，final 才会进入 AI 面试官理解和追问。</p>
         </section>
