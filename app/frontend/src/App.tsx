@@ -1,0 +1,535 @@
+import {
+  Bot,
+  CheckCircle2,
+  CircleStop,
+  Mic,
+  MicOff,
+  PhoneOff,
+  Play,
+  RotateCcw,
+  Send,
+  Volume2
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+type SessionState = "idle" | "connecting" | "active" | "ended";
+type MicState = "unknown" | "checking" | "granted" | "simulated";
+type RuntimeMode = "backend" | "local";
+type StepState = "idle" | "active" | "done";
+
+interface TranscriptItem {
+  id: string;
+  kind: "partial" | "final";
+  text: string;
+  time: string;
+}
+
+interface AssistantMessage {
+  id: string;
+  text: string;
+  time: string;
+}
+
+interface EventLog {
+  id: string;
+  time: string;
+  type: string;
+  text: string;
+}
+
+interface ServerEvent {
+  type: string;
+  text?: string;
+  status?: string;
+  message?: string;
+  code?: string;
+  stt_final_latency_ms?: number;
+  llm_first_token_ms?: number;
+  tts_first_audio_ms?: number;
+  end_to_end_first_audio_ms?: number;
+  barge_in_response_ms?: number;
+  interrupted?: boolean;
+}
+
+const apiBase = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
+
+const openingMessage =
+  "你好，我是本轮技术面试的 AI 面试官。我们先从你的项目经历开始，请你用两到三分钟介绍一个最能代表你能力的项目。";
+
+const demoAnswer =
+  "我之前主要负责一个招聘系统里的候选人匹配模块，包括简历解析、岗位画像和排序策略。上线后推荐点击率提升了约 18%，人工筛选时间也明显下降。";
+
+const localFollowUp =
+  "好的。你提到了排序策略，我想继续追问一下：当时你们如何评估排序结果的质量？线上指标和人工评估之间有没有出现过冲突？";
+
+function nowTime() {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(new Date());
+}
+
+function makeId(prefix: string) {
+  return `${prefix}_${Math.random().toString(16).slice(2, 8)}`;
+}
+
+function formatMs(value?: number) {
+  return typeof value === "number" ? `${value}ms` : "-";
+}
+
+export function App() {
+  const [sessionState, setSessionState] = useState<SessionState>("idle");
+  const [micState, setMicState] = useState<MicState>("unknown");
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("local");
+  const [sessionId, setSessionId] = useState("-");
+  const [providerInfo, setProviderInfo] = useState("mock STT / mock TTS");
+  const [isRecording, setIsRecording] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [activeTranscript, setActiveTranscript] = useState("");
+  const [transcripts, setTranscripts] = useState<TranscriptItem[]>([]);
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
+  const [events, setEvents] = useState<EventLog[]>([]);
+  const [latency, setLatency] = useState({
+    stt: "-",
+    llm: "-",
+    tts: "-",
+    total: "-",
+    interrupt: "-"
+  });
+  const wsRef = useRef<WebSocket | null>(null);
+  const timers = useRef<number[]>([]);
+
+  const steps = useMemo(
+    () => [
+      {
+        title: "开始面试",
+        detail: runtimeMode === "backend" ? "已连接后端 mock 服务" : "可本地模拟",
+        state: sessionState === "idle" || sessionState === "ended" ? "idle" : "done"
+      },
+      {
+        title: "候选人回答",
+        detail: transcripts.some((item) => item.kind === "final") ? "final 文本已生成" : "partial 只做字幕展示",
+        state: isRecording ? "active" : transcripts.length ? "done" : "idle"
+      },
+      {
+        title: "AI 追问播放",
+        detail: isPlaying ? "TTS 输出中，可随时打断" : assistantMessages.length > 1 ? "本轮回复已完成" : "等待 final 文本",
+        state: isPlaying ? "active" : assistantMessages.length > 1 ? "done" : "idle"
+      }
+    ] satisfies Array<{ title: string; detail: string; state: StepState }>,
+    [assistantMessages.length, isPlaying, isRecording, runtimeMode, sessionState, transcripts]
+  );
+
+  useEffect(() => {
+    return () => {
+      clearTimers();
+      wsRef.current?.close();
+    };
+  }, []);
+
+  function clearTimers() {
+    timers.current.forEach((timer) => window.clearTimeout(timer));
+    timers.current = [];
+  }
+
+  function schedule(callback: () => void, delay: number) {
+    const timer = window.setTimeout(callback, delay);
+    timers.current.push(timer);
+  }
+
+  function addEvent(type: string, text: string) {
+    setEvents((items) => [{ id: makeId("evt"), time: nowTime(), type, text }, ...items].slice(0, 6));
+  }
+
+  async function requestMicPermission() {
+    setMicState("checking");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicState("simulated");
+      addEvent("mic.simulated", "浏览器未提供麦克风 API，使用模拟回答。");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+      setMicState("granted");
+      addEvent("mic.granted", "麦克风权限已授权。");
+    } catch {
+      setMicState("simulated");
+      addEvent("mic.fallback", "未授权麦克风，使用模拟回答。");
+    }
+  }
+
+  async function startInterview() {
+    resetRuntime();
+    setSessionState("connecting");
+    await requestMicPermission();
+
+    try {
+      const response = await fetch(`${apiBase}/api/interview-sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidate_id: "demo_candidate",
+          job_id: "ai_interviewer_demo",
+          language: "zh-CN",
+          stt_provider: "mock",
+          tts_provider: "mock",
+          voice_profile: "professional_warm_female",
+          enable_recording: false
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const session = await response.json();
+      setSessionId(session.session_id);
+      setProviderInfo(`${session.stt_provider} STT / ${session.tts_provider} TTS`);
+      connectWebSocket(session.websocket_url);
+    } catch (error) {
+      setRuntimeMode("local");
+      setSessionState("active");
+      addEvent("backend.fallback", `后端不可用，使用本地模式。${String(error)}`);
+      playOpeningMessage();
+    }
+  }
+
+  function connectWebSocket(websocketUrl: string) {
+    const socket = new WebSocket(websocketUrl);
+    wsRef.current = socket;
+
+    socket.onopen = () => {
+      setRuntimeMode("backend");
+      setSessionState("active");
+      addEvent("ws.open", "后端 WebSocket 已连接。");
+      playOpeningMessage();
+    };
+
+    socket.onmessage = (message) => {
+      try {
+        handleServerEvent(JSON.parse(message.data));
+      } catch {
+        addEvent("error", "收到无法解析的后端消息。");
+      }
+    };
+
+    socket.onerror = () => addEvent("ws.error", "WebSocket 出错，仍可使用本地模拟。");
+  }
+
+  function playOpeningMessage() {
+    setAssistantMessages([{ id: makeId("msg"), text: openingMessage, time: nowTime() }]);
+    setIsPlaying(true);
+    addEvent("assistant.text", "面试官开场白已生成。");
+    schedule(() => {
+      setIsPlaying(false);
+      addEvent("tts.done", "开场白播放完成。");
+    }, 1800);
+  }
+
+  function handleServerEvent(serverEvent: ServerEvent) {
+    if (serverEvent.type === "session.ready") {
+      addEvent("session.ready", "会话已就绪。");
+      return;
+    }
+
+    if (serverEvent.type === "stt.partial") {
+      setIsRecording(true);
+      setActiveTranscript(serverEvent.text ?? "");
+      setTranscripts((items) => [
+        ...items.filter((item) => item.kind !== "partial"),
+        { id: makeId("stt"), kind: "partial", text: serverEvent.text ?? "", time: nowTime() }
+      ]);
+      addEvent("stt.partial", "实时字幕更新，未进入 LLM。");
+      return;
+    }
+
+    if (serverEvent.type === "stt.final") {
+      setIsRecording(false);
+      setActiveTranscript("");
+      setTranscripts((items) => [
+        ...items.filter((item) => item.kind !== "partial"),
+        { id: makeId("stt"), kind: "final", text: serverEvent.text ?? "", time: nowTime() }
+      ]);
+      addEvent("stt.final", "稳定文本进入编排逻辑。");
+      return;
+    }
+
+    if (serverEvent.type === "assistant.text") {
+      setAssistantMessages((items) => [...items, { id: makeId("msg"), text: serverEvent.text ?? "", time: nowTime() }]);
+      addEvent("assistant.text", "AI 面试官生成追问。");
+      return;
+    }
+
+    if (serverEvent.type === "tts.audio") {
+      setIsPlaying(serverEvent.status !== "tts_completed" && serverEvent.status !== "cancelled");
+      addEvent("tts.audio", `TTS 状态：${serverEvent.status ?? "streaming"}`);
+      return;
+    }
+
+    if (serverEvent.type === "metrics.turn") {
+      setLatency({
+        stt: formatMs(serverEvent.stt_final_latency_ms),
+        llm: formatMs(serverEvent.llm_first_token_ms),
+        tts: formatMs(serverEvent.tts_first_audio_ms),
+        total: formatMs(serverEvent.end_to_end_first_audio_ms),
+        interrupt: formatMs(serverEvent.barge_in_response_ms)
+      });
+      addEvent("metrics.turn", serverEvent.interrupted ? "收到打断指标。" : "收到本轮延迟指标。");
+      return;
+    }
+
+    if (serverEvent.type === "control.interrupted") {
+      setIsPlaying(false);
+      setIsRecording(false);
+      setLatency((item) => ({ ...item, interrupt: "80ms" }));
+      addEvent("control.interrupted", "后端已取消当前 TTS。");
+      return;
+    }
+
+    if (serverEvent.type === "error") {
+      addEvent("error", `${serverEvent.code ?? "ERROR"}：${serverEvent.message ?? "未知错误"}`);
+    }
+  }
+
+  function simulateAnswer() {
+    if (sessionState !== "active") return;
+
+    clearTimers();
+    setIsRecording(true);
+    setIsPlaying(false);
+    setActiveTranscript("");
+    setTranscripts([]);
+
+    if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "demo.answer_start", text: "我负责候选人匹配模块" }));
+      schedule(() => {
+        wsRef.current?.send(JSON.stringify({ type: "demo.answer_complete", text: demoAnswer }));
+      }, 900);
+      return;
+    }
+
+    runLocalAnswerSimulation();
+  }
+
+  function runLocalAnswerSimulation() {
+    const partials = [
+      "我之前主要负责一个招聘系统里的候选人匹配模块",
+      "我之前主要负责一个招聘系统里的候选人匹配模块，包括简历解析、岗位画像和排序策略"
+    ];
+
+    partials.forEach((text, index) => {
+      schedule(() => {
+        setActiveTranscript(text);
+        setTranscripts((items) => [
+          ...items.filter((item) => item.kind !== "partial"),
+          { id: makeId("stt"), kind: "partial", text, time: nowTime() }
+        ]);
+        addEvent("stt.partial", "本地 partial 字幕更新。");
+      }, 400 + index * 700);
+    });
+
+    schedule(() => {
+      setIsRecording(false);
+      setActiveTranscript("");
+      setTranscripts((items) => [
+        ...items.filter((item) => item.kind !== "partial"),
+        { id: makeId("stt"), kind: "final", text: demoAnswer, time: nowTime() }
+      ]);
+      addEvent("stt.final", "本地 final 文本触发追问。");
+    }, 2100);
+
+    schedule(() => {
+      setAssistantMessages((items) => [...items, { id: makeId("msg"), text: localFollowUp, time: nowTime() }]);
+      setLatency({ stt: "1.18s", llm: "530ms", tts: "680ms", total: "2.39s", interrupt: "-" });
+      setIsPlaying(true);
+      addEvent("assistant.text", "本地生成追问并模拟 TTS。");
+    }, 2700);
+
+    schedule(() => {
+      setIsPlaying(false);
+      addEvent("tts.done", "追问播放完成。");
+    }, 5200);
+  }
+
+  function interruptPlayback() {
+    clearTimers();
+    setIsPlaying(false);
+    setIsRecording(false);
+    if (runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "control.interrupt", reason: "user_speech_detected" }));
+      addEvent("control.interrupt", "已通知后端取消当前 TTS。");
+    } else {
+      setLatency((item) => ({ ...item, interrupt: "86ms" }));
+      addEvent("control.interrupt", "已清空本地播放和录音状态。");
+    }
+  }
+
+  function endInterview() {
+    clearTimers();
+    wsRef.current?.close();
+    setSessionState("ended");
+    setIsRecording(false);
+    setIsPlaying(false);
+    setActiveTranscript("");
+    addEvent("session.ended", "面试已结束。");
+  }
+
+  function resetRuntime() {
+    clearTimers();
+    wsRef.current?.close();
+    setRuntimeMode("local");
+    setSessionId("-");
+    setProviderInfo("mock STT / mock TTS");
+    setIsRecording(false);
+    setIsPlaying(false);
+    setActiveTranscript("");
+    setTranscripts([]);
+    setAssistantMessages([]);
+    setLatency({ stt: "-", llm: "-", tts: "-", total: "-", interrupt: "-" });
+    setEvents([]);
+  }
+
+  function resetDemo() {
+    resetRuntime();
+    setSessionState("idle");
+    setMicState("unknown");
+  }
+
+  const finalTranscript = transcripts.find((item) => item.kind === "final");
+  const latestAssistant = assistantMessages[assistantMessages.length - 1];
+  const canAnswer = sessionState === "active" && !isRecording;
+
+  return (
+    <main className="shell">
+      <header className="header">
+        <div>
+          <p className="kicker">AI Interviewer Voice Demo</p>
+          <h1>三步跑通 AI 面试语音链路</h1>
+          <p className="lead">开始面试，模拟候选人回答，查看转写、追问、播放和打断。</p>
+        </div>
+        <button className="ghost-button" type="button" onClick={resetDemo}>
+          <RotateCcw size={17} />
+          重置
+        </button>
+      </header>
+
+      <section className="status-strip" aria-label="当前运行状态">
+        <StatusItem label="模式" value={runtimeMode === "backend" ? "后端联动" : "本地模拟"} />
+        <StatusItem label="会话" value={sessionId} />
+        <StatusItem label="Provider" value={providerInfo} />
+        <StatusItem label="麦克风" value={micState === "granted" ? "已授权" : micState === "checking" ? "检查中" : micState === "simulated" ? "模拟" : "未检查"} />
+      </section>
+
+      <section className="command-bar">
+        <button className="primary-button" type="button" onClick={startInterview} disabled={sessionState === "active" || sessionState === "connecting"}>
+          <Play size={18} />
+          开始面试
+        </button>
+        <button className="plain-button" type="button" onClick={simulateAnswer} disabled={!canAnswer}>
+          <Mic size={18} />
+          模拟回答
+        </button>
+        <button className="plain-button danger" type="button" onClick={interruptPlayback} disabled={!isPlaying && !isRecording}>
+          <CircleStop size={18} />
+          打断
+        </button>
+        <button className="plain-button" type="button" onClick={endInterview} disabled={sessionState !== "active"}>
+          <PhoneOff size={18} />
+          结束
+        </button>
+      </section>
+
+      <section className="steps" aria-label="演示步骤">
+        {steps.map((step, index) => (
+          <article className={`step ${step.state}`} key={step.title}>
+            <span>{index + 1}</span>
+            <div>
+              <strong>{step.title}</strong>
+              <p>{step.detail}</p>
+            </div>
+            {step.state === "done" && <CheckCircle2 size={18} />}
+          </article>
+        ))}
+      </section>
+
+      <section className="workspace">
+        <section className="main-panel">
+          <div className="panel-title">
+            <MicStatus micState={micState} isRecording={isRecording} />
+            <span>{isRecording ? "正在听候选人回答" : "候选人回答区"}</span>
+          </div>
+          <div className={isRecording ? "speech-box listening" : "speech-box"}>
+            {activeTranscript || finalTranscript?.text || "点击“模拟回答”，这里会先显示实时 partial，随后变成 final 文本。"}
+          </div>
+          <p className="hint">规则：partial 只展示给用户，final 才会进入 AI 面试官理解和追问。</p>
+        </section>
+
+        <section className="main-panel">
+          <div className="panel-title">
+            {isPlaying ? <Volume2 size={18} /> : <Bot size={18} />}
+            <span>{isPlaying ? "面试官正在播放" : "AI 面试官回复"}</span>
+          </div>
+          <div className={isPlaying ? "speech-box playing" : "speech-box"}>
+            {latestAssistant?.text || "开始面试后，面试官会先开场。候选人 final 文本生成后，这里会出现追问。"}
+          </div>
+          <p className="hint">TTS 真实接入时会把这段文本清洗、断句，再送到语音合成服务。</p>
+        </section>
+      </section>
+
+      <section className="bottom-grid">
+        <div className="metrics">
+          <Metric label="STT final" value={latency.stt} />
+          <Metric label="LLM 首响" value={latency.llm} />
+          <Metric label="TTS 首包" value={latency.tts} />
+          <Metric label="端到端" value={latency.total} />
+          <Metric label="打断" value={latency.interrupt} />
+        </div>
+        <div className="event-log">
+          <div className="panel-title small">
+            <Send size={16} />
+            <span>最近事件</span>
+          </div>
+          {events.length === 0 ? (
+            <p className="empty">还没有事件。点击“开始面试”即可看到链路变化。</p>
+          ) : (
+            events.map((event) => (
+              <div className="event-row" key={event.id}>
+                <time>{event.time}</time>
+                <strong>{event.type}</strong>
+                <span>{event.text}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function MicStatus({ micState, isRecording }: { micState: MicState; isRecording: boolean }) {
+  if (isRecording) return <Mic size={18} />;
+  if (micState === "granted") return <Mic size={18} />;
+  return <MicOff size={18} />;
+}
+
+function StatusItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="status-item">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
