@@ -100,6 +100,8 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
     current_tts_task: Optional[asyncio.Task] = None
     aliyun_asr: Optional[AliyunRealtimeTranscriber] = None
     asr_event_task: Optional[asyncio.Task] = None
+    latest_asr_text = ""
+    audio_chunk_count = 0
 
     async def handle_final_transcript(final_text: str) -> None:
         nonlocal current_tts_task
@@ -119,10 +121,14 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
         )
 
     async def forward_asr_events() -> None:
+        nonlocal latest_asr_text
+
         if not aliyun_asr:
             return
         while True:
             asr_event = await aliyun_asr.events.get()
+            if asr_event.get("text"):
+                latest_asr_text = asr_event["text"]
             await websocket.send_json(asr_event)
             if asr_event.get("type") == "stt.final":
                 await handle_final_transcript(asr_event.get("text", ""))
@@ -151,10 +157,41 @@ async def voice_session(websocket: WebSocket, session_id: str = Query(...)) -> N
 
             if incoming.type == "audio.chunk":
                 codec = (incoming.format or {}).get("codec")
+                audio_chunk_count += 1
                 if aliyun_asr and codec == "pcm_s16le" and incoming.audio_base64:
                     aliyun_asr.send_audio(base64.b64decode(incoming.audio_base64))
+                    if audio_chunk_count == 1 or audio_chunk_count % 20 == 0:
+                        await websocket.send_json(
+                            event(
+                                "audio.received",
+                                provider="aliyun",
+                                chunks=audio_chunk_count,
+                                message="后端已收到真实麦克风音频，正在等待阿里云返回转写。",
+                            )
+                        )
                     continue
                 await websocket.send_json(mock_stt.partial_from_audio_chunk(incoming.seq))
+                continue
+
+            if incoming.type == "audio.stop":
+                if aliyun_asr:
+                    try:
+                        aliyun_asr.stop()
+                    except Exception:
+                        pass
+
+                final_text = latest_asr_text.strip()
+                if not final_text and audio_chunk_count > 0:
+                    final_text = "候选人已经通过语音完成了本轮回答，但阿里云本轮没有返回可用转写。请基于当前面试上下文继续追问。"
+
+                if final_text:
+                    stt_final = mock_stt.final_from_demo_answer(final_text)
+                    await websocket.send_json(stt_final)
+                    await handle_final_transcript(stt_final["text"])
+                else:
+                    await websocket.send_json(
+                        event("error", code="NO_AUDIO_TEXT", message="没有收到可提交的语音文本，请检查麦克风权限。")
+                    )
                 continue
 
             if incoming.type == "demo.answer_start":

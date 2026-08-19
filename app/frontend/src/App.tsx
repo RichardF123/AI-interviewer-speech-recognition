@@ -87,6 +87,7 @@ interface ServerEvent {
   end_to_end_first_audio_ms?: number;
   barge_in_response_ms?: number;
   interrupted?: boolean;
+  chunks?: number;
 }
 
 const apiBase = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
@@ -145,6 +146,7 @@ export function App() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const pcmStreamingRef = useRef(false);
   const audioSeqRef = useRef(0);
   const activeTranscriptRef = useRef("");
   const submittedSpeechRef = useRef(false);
@@ -362,6 +364,22 @@ export function App() {
       return;
     }
 
+    if (serverEvent.type === "asr.ready") {
+      addEvent("asr.ready", "阿里云实时语音识别已就绪。");
+      return;
+    }
+
+    if (serverEvent.type === "asr.fallback") {
+      addEvent("asr.fallback", serverEvent.message ?? "阿里云实时识别不可用，后端将使用兜底链路。");
+      return;
+    }
+
+    if (serverEvent.type === "audio.received") {
+      updateActiveTranscript(`已接收真实麦克风音频 ${serverEvent.chunks ?? ""} 个分片，正在等待阿里云转写。`);
+      addEvent("audio.received", serverEvent.message ?? "后端已收到真实麦克风音频。");
+      return;
+    }
+
     if (serverEvent.type === "stt.partial") {
       setIsRecording(true);
       updateActiveTranscript(serverEvent.text ?? "");
@@ -541,7 +559,11 @@ export function App() {
 
   function stopLiveAnswer() {
     if (!isRecording) return;
-    if (activeTranscriptRef.current.trim()) {
+    if (pcmStreamingRef.current && runtimeMode === "backend" && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "audio.stop" }));
+      updateActiveTranscript("本轮语音已提交，正在等待 AI 面试官反馈。");
+      addEvent("audio.stop", "已提交阿里云实时语音识别本轮音频。");
+    } else if (activeTranscriptRef.current.trim()) {
       submitFinalAnswer(activeTranscriptRef.current.trim());
     } else if (mediaRecorderRef.current) {
       submitFinalAnswer("候选人已经通过麦克风完成回答。当前浏览器只上传了音频流，阿里云实时 ASR 接入后这里会显示真实转写。");
@@ -615,6 +637,7 @@ export function App() {
       audioContextRef.current = audioContext;
       audioSourceRef.current = source;
       audioProcessorRef.current = processor;
+      pcmStreamingRef.current = true;
       audioSeqRef.current = 0;
       updateActiveTranscript("正在通过阿里云接收真实麦克风音频，请直接说话。");
       addEvent("audio.pcm.start", "16k PCM 麦克风流已启动，发送到后端阿里云 ASR。");
@@ -653,6 +676,7 @@ export function App() {
     audioProcessorRef.current = null;
     audioSourceRef.current = null;
     audioContextRef.current = null;
+    pcmStreamingRef.current = false;
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
   }
