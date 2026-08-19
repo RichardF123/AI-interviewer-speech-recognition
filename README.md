@@ -1,209 +1,184 @@
-# AI 面试官语音识别 Demo
+# AI Interviewer Speech Recognition
 
-本项目是 AI 面试官语音功能的第一版 Demo 方案与开发骨架，目标是打通“候选人说话 -> 语音识别转文字 -> AI 面试官理解并生成回复 -> 回复转语音播放”的基础链路。
-
-当前仓库重点交付两部分：
-
-- `app/frontend`：可运行的 Vite + React + TypeScript 前端展示控制台。
-- `app/backend`：可运行的 FastAPI mock 后端，提供 REST session 创建和 WebSocket 语音事件链路。
-- `docs/`：产品、架构、接口、事件协议、Prompt、TTS 风格、MVP 计划、风险合规和汇报材料。
-- `scaffold/`：更细的前后端开发骨架，包含 provider 抽象、播放控制和模块边界。
-
-当前版本不包含真实外部 API 接入，不包含真实 API Key、Secret 或 Token。默认链路使用 mock provider，用于演示交互流程、评审技术方案和继续开发。
-
-## 目录结构
+电话式 AI 面试语音链路 Demo。目标是验证一条可装载到任意大模型上的实时语音承载层：
 
 ```text
-.
-├── docs/
-│   ├── 00-overview.md
-│   ├── 01-prd.md
-│   ├── 02-architecture.md
-│   ├── 03-api-contract.md
-│   ├── 04-event-protocol.md
-│   ├── 05-prompt-templates.md
-│   ├── 06-tts-style-templates.md
-│   ├── 07-mvp-development-plan.md
-│   ├── 08-risk-and-compliance.md
-│   ├── 09-observability-and-metrics.md
-│   ├── 10-demo-report.md
-│   └── 11-deploy-and-api-keys.md
-├── app/
-│   ├── frontend/
-│   │   ├── package.json
-│   │   └── src/
-│   └── backend/
-│       ├── requirements.txt
-│       └── app/
-└── scaffold/
-    ├── frontend/
-    │   └── src/
-    │       ├── audio/
-    │       ├── types/
-    │       └── ws/
-    └── backend/
-        └── app/
-            ├── api/
-            ├── core/
-            ├── schemas/
-            ├── services/
-            └── ws/
+候选人说话 -> 实时/准实时转写 -> final 文本进入 LLM -> AI 输出文字 -> 自动语音播报
 ```
 
-## 当前 Demo 能力
+当前版本已经不是纯 mock。项目已接入：
 
-当前 mock 链路用于展示端到端事件流：
+- LLM：DeepSeek Chat Completions
+- 实时 ASR 主链路：阿里云 NLS 实时语音识别
+- 分段 ASR 备份：MiMo `mimo-v2.5-asr`
+- TTS：阿里云 NLS TTS，前端浏览器 `speechSynthesis` 兜底
+- 前端实时字幕优先使用浏览器 `SpeechRecognition`
 
-1. 前端采集麦克风音频，按 chunk 通过 WebSocket 发送。
-2. 后端 `mock STT` 生成 `stt.partial` 和 `stt.final`。
-3. 只有 `stt.final` 会进入面试编排逻辑。
-4. `InterviewOrchestrator` 生成面试官文本回复。
-5. 后端 `mock TTS` 生成 `tts.audio` 占位事件。
-6. 前端接收文本、语音事件，并支持 `control.interrupt` 打断控制。
+## 当前能力
 
-这个版本适合用于产品演示、研发评审和接口联调，不适合作为生产系统直接上线。
+- 点击一次“开始面试”后进入电话式会话。
+- 自动请求麦克风权限，不再要求手动点击“实时回答”。
+- 候选人说话时，前端优先用浏览器实时字幕显示 partial。
+- 稳定 final 文本通过 WebSocket 发送给后端。
+- 后端把 final 文本送入 DeepSeek，partial 不进入 LLM。
+- AI 面试官文字回复立即展示。
+- 前端优先自动朗读 AI 回复，阿里云 TTS 可用时也会返回真实 mp3。
+- 多轮输入采用“最新输入优先”，避免上一轮 LLM/TTS 卡住下一轮。
+- 系统状态、麦克风状态、转写状态不会被当作候选人回答。
 
-## 启动后端
+## 技术栈
 
-进入可运行后端目录：
+前端：
 
-```bash
-cd app/backend
+- React
+- Vite
+- TypeScript
+- Web Audio API
+- SpeechRecognition / webkitSpeechRecognition
+- WebSocket
+- Browser speechSynthesis
+- lucide-react
+
+后端：
+
+- Python
+- FastAPI
+- Uvicorn
+- Pydantic
+- WebSocket
+- DeepSeek Chat Completions
+- 阿里云 NLS Python SDK
+- MiMo Speech Recognition API
+
+## 当前链路
+
+```text
+Browser
+  -> getUserMedia 获取麦克风
+  -> Web Audio API 采集 16k PCM
+  -> SpeechRecognition 显示实时字幕
+  -> speech.final 发送稳定文本
+
+FastAPI WebSocket
+  -> stt.final
+  -> llm.input
+  -> DeepSeek
+  -> assistant.text
+  -> Aliyun TTS / Browser TTS
 ```
 
-创建虚拟环境并安装依赖：
+后端同时会尝试启动阿里云实时 ASR：
+
+```text
+audio.chunk -> AliyunRealtimeTranscriber -> stt.partial / stt.final
+```
+
+如果阿里云实时 ASR 因网络或权限超时，页面仍可通过浏览器 `SpeechRecognition` 完成实时字幕和 final 提交。
+
+## 本地运行
+
+后端：
 
 ```powershell
+cd app/backend
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8011
 ```
 
-启动 FastAPI：
+前端：
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+cd app/frontend
+npm install
+npm run dev -- --host 127.0.0.1 --port 5185
 ```
 
-默认服务地址：
+访问：
 
 ```text
-http://127.0.0.1:8000
+http://127.0.0.1:5185/
 ```
 
 健康检查：
 
 ```text
-GET /health
+http://127.0.0.1:8011/health
+http://127.0.0.1:8011/api/provider-status
 ```
 
-核心接口：
+## 环境变量
 
-- `POST /api/interview-sessions`
-- `WS /ws/voice/session`
+后端读取 `app/backend/.env`。真实密钥不要提交到 Git。
 
-## 启动前端
+```env
+DEEPSEEK_API_KEY=
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
 
-进入可运行前端目录：
+ALIYUN_NLS_APP_KEY=
+ALIYUN_ACCESS_KEY_ID=
+ALIYUN_ACCESS_KEY_SECRET=
+ALIYUN_NLS_TOKEN=
+ALIYUN_NLS_ENDPOINT=wss://nls-gateway-cn-shanghai.aliyuncs.com/ws/v1
+ALIYUN_TTS_ENDPOINT=https://nls-gateway-cn-shanghai.aliyuncs.com/stream/v1/tts
+ALIYUN_TTS_VOICE=zhixiaoxia
 
-```powershell
-cd app/frontend
-npm install
-npm run dev
+MIMO_API_KEY=
+MIMO_BASE_URL=https://api.xiaomimimo.com/v1
+MIMO_ASR_MODEL=mimo-v2.5-asr
+MIMO_ASR_LANGUAGE=zh
 ```
 
-默认访问：
+## API 服务说明
+
+DeepSeek：
+
+- 用于 AI 面试官文本回复。
+- 当前 prompt 定位为“实时语音交互承载型 AI 面试官”，不绑定具体面试内容。
+- 后续可替换为微调后的 OpenAI-compatible 模型。
+
+阿里云 NLS：
+
+- 实时 ASR：目标是提供后端 `stt.partial` / `stt.final`。
+- TTS：生成真实 mp3 语音。
+- 若实时 ASR WebSocket 连接超时，需要检查阿里云项目是否开通实时语音识别、AppKey 所属项目、AccessKey 权限和本机网络。
+
+MiMo：
+
+- 当前 `mimo-v2.5-asr` 是音频文件/base64 转写，不是真正流式 ASR。
+- 适合作为录音片段兜底，不适合作为豆包电话式实时字幕主链路。
+
+## 已知限制
+
+- Codex 内置浏览器可能不支持 `SpeechRecognition`，推荐用 Chrome 或 Edge 访问本地页面。
+- MiMo 不支持麦克风音频流式 partial。
+- 阿里云实时 ASR 如果网络或权限不通，会返回启动超时；此时不会伪造候选人文本。
+- 当前 LLM 仍是非 streaming 请求，文字首响已经可用，但还不是 token 级流式。
+- 当前 TTS 优先保证“听得到”，后续应升级为真正流式 TTS。
+
+## 下一步技术路径
+
+要接近豆包电话体验，需要继续升级为全流式链路：
 
 ```text
-http://127.0.0.1:5173
+AudioWorklet 10-20ms PCM
+  -> 流式 ASR partial/final
+  -> 流式 LLM token
+  -> 句子级/流式 TTS
+  -> 播放中 VAD barge-in 打断
 ```
 
-前端会优先连接 `http://127.0.0.1:8000` 的后端 mock 服务；如果后端未启动，会自动降级到本地模拟模式。
+优先级：
 
-## 上线
+1. 确认阿里云实时 ASR WebSocket 权限和网络，稳定返回 partial/final。
+2. 将 DeepSeek 调用升级为 streaming，前端立即显示 delta。
+3. 将 TTS 改成流式合成和播放队列。
+4. 增加本地 VAD 和回声消除，AI 播放时也能检测用户插话。
+5. 抽象 provider，让项目可以直接切换到微调好的大模型或端到端实时语音模型。
 
-当前仓库已添加 GitHub Pages 自动部署 workflow：
+## 文档
 
-```text
-.github/workflows/deploy-frontend.yml
-```
-
-推送到 `main` 后会自动构建 `app/frontend` 并发布前端页面。首次使用时，请到 GitHub 仓库 `Settings -> Pages`，把发布来源设置为 `GitHub Actions`。
-
-预计访问地址：
-
-```text
-https://richardf123.github.io/AI-interviewer-speech-recognition/
-```
-
-更完整的上线和 API 获取说明见：
-
-- `docs/11-deploy-and-api-keys.md`
-
-当前前端技术栈：
-
-- React + Vite
-- TypeScript
-- Web Audio API 麦克风授权检查
-- WebSocket
-- lucide-react 图标
-
-## 需要的 API 服务
-
-当前 Demo 不依赖真实外部 API。进入真实 MVP 时，需要准备以下服务：
-
-- STT：Azure Speech SDK，或腾讯云实时语音识别，或阿里云智能语音交互。
-- TTS：Azure Neural TTS，或 OpenAI TTS。
-- LLM：用于面试官理解、追问和评分的模型服务。
-- 存储：PostgreSQL 保存会话、事件和指标；S3/OSS/COS 保存授权后的音频片段。
-- 可观测性：OpenTelemetry、Prometheus/Grafana、ELK 或同类日志指标系统。
-
-## Provider 接入位置
-
-STT provider：
-
-- 当前可运行 mock：`app/backend/app/mock_services.py`
-- 抽象设计参考：`scaffold/backend/app/services/stt/base.py`
-- Azure 占位参考：`scaffold/backend/app/services/stt/azure.py`
-
-TTS provider：
-
-- 当前可运行 mock：`app/backend/app/mock_services.py`
-- 抽象设计参考：`scaffold/backend/app/services/tts/base.py`
-- Azure 占位参考：`scaffold/backend/app/services/tts/azure.py`
-
-配置入口：
-
-- 可运行后端：`app/backend/app/config.py`
-- 抽象骨架：`scaffold/backend/app/core/config.py`
-
-建议环境变量：
-
-```bash
-APP_ENV=development
-DEFAULT_STT_PROVIDER=mock
-DEFAULT_TTS_PROVIDER=mock
-AZURE_SPEECH_KEY=
-AZURE_SPEECH_REGION=
-AZURE_TTS_VOICE=zh-CN-XiaoxiaoNeural
-DATABASE_URL=
-AUDIO_BUCKET_NAME=
-```
-
-不要把真实密钥提交到仓库。生产环境应通过密钥管理系统或部署平台环境变量注入。
-
-## 使用注意事项
-
-- `stt.partial` 只用于前端字幕展示，不进入 LLM。
-- `stt.final` 或稳定后的 utterance 才能进入面试官编排逻辑。
-- 候选人开口打断时，前端应立即停止当前播放队列，并向后端发送 `control.interrupt`。
-- TTS 前必须做文本清洗、断句和风格包装，避免直接朗读 Markdown、代码块、复杂编号或过长句子。
-- Edge TTS、ChatTTS、Bark 等方案只适合作为非商用研究或 demo 参考，不作为商业默认方案。
-- 真实上线前必须补齐候选人授权、录音告知、数据删除、访问控制、审计和供应商数据处理评估。
-
-## 推荐阅读
-
-- `docs/02-architecture.md`：整体架构和时序。
-- `docs/03-api-contract.md`：REST 和 WebSocket 契约。
-- `docs/04-event-protocol.md`：事件协议。
-- `docs/06-tts-style-templates.md`：面试官语音风格。
-- `docs/10-demo-report.md`：汇报材料。
+- `docs/12-latency-technical-report.md`：阶段汇报、延迟分析和实时语音方案。
+- `app/backend/README.md`：后端接口和 provider 说明。
+- `app/frontend/README.md`：前端电话式交互说明。

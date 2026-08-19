@@ -19,9 +19,9 @@
 
 - React + Vite + TypeScript 前端。
 - 输出区在上方，候选人输入区在下方。
-- 支持开始面试、实时回答、结束回答、打断、重置。
+- 支持开始面试、电话式自动聆听、静音/恢复、打断、结束和重置。
 - 使用 Web Audio API 获取麦克风 PCM 音频。
-- 使用浏览器 SpeechRecognition 作为低延迟字幕源，后端默认切换为 MiMo ASR 段式转写。
+- 使用浏览器 SpeechRecognition 作为低延迟字幕源，后端默认尝试阿里云 NLS 实时 ASR。
 - 增加低延迟麦克风活动反馈：检测到声音后 100-250ms 内显示输入状态。
 - 增加 `发送给 LLM` 调试行，展示真实进入大模型的候选人 final 文本。
 - 明确区分候选人转写和系统状态，系统状态不会再被当成候选人答复。
@@ -37,7 +37,7 @@
 - 接入阿里云 NLS Token 创建。
 - 接入阿里云 NLS TTS HTTP 调用。
 - 增加阿里云实时 ASR SDK 桥接 `AliyunRealtimeTranscriber`，保留为可切换方案。
-- 新增 MiMo ASR `mimo-v2.5-asr` 接入：前端上传 PCM，后端在用户结束回答时封装为 WAV/base64 后调用 MiMo。
+- 新增 MiMo ASR `mimo-v2.5-asr` 接入：作为分段识别备份，前端上传 PCM，后端在用户结束回答时封装为 WAV/base64 后调用 MiMo。
 - 增加 `llm.input` 事件，把进入 LLM 的 final 文本回传前端。
 - 禁止 ASR 无文本时触发 LLM，避免系统状态污染候选人回答。
 
@@ -80,15 +80,24 @@
 - DeepSeek Chat Completions
 - WebSocket
 
-## 3.1 MiMo ASR 切换说明
+## 3.1 ASR Provider 说明
 
-2026-08-19 已按最新要求把默认 ASR provider 从 `aliyun` 切到 `mimo`。
+2026-08-19 当前默认 ASR provider 为 `aliyun`，目标是优先使用阿里云 NLS 实时语音识别；MiMo 保留为分段 ASR 备份。
+
+阿里云实时 ASR：
+
+- 后端通过 `AliyunRealtimeTranscriber` 启动长连接。
+- 前端持续上传 16kHz PCM 音频分片。
+- 目标事件为 `stt.partial` 和 `stt.final`。
+- 当前本机曾出现 `Wait response timeout! Please check local network!`，需要继续确认阿里云项目权限和本机 WebSocket 网络。
+
+MiMo 分段 ASR：
 
 - 官方文档：https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/Speech-Recognition
 - 模型：`mimo-v2.5-asr`
 - 输入：`wav` / `mp3` 音频，base64 或 Data URL。
 - 当前实现：浏览器采集 16kHz PCM，后端在 `audio.stop` 后封装为 WAV，再调用 MiMo `/v1/chat/completions`。
-- 能力边界：MiMo 当前文档示例是“整段音频转写”，不是麦克风音频流式上传，因此无法提供真正 ASR partial；2-3 秒目标依赖短回答、及时停止录音和接口响应速度。
+- 能力边界：MiMo 当前文档示例是“整段音频转写”，不是麦克风音频流式上传，因此无法提供真正 ASR partial。
 
 ## 3.2 电话式实时语音目标重定义
 
@@ -111,6 +120,7 @@
 - 前端使用浏览器 `SpeechRecognition` 做实时字幕和低延迟 final 触发。
 - 后端新增通用 `speech.final` 事件别名，替代 demo 专用事件。
 - LLM prompt 改为“实时语音交互承载型 AI 面试官”，不再绑定具体面试内容。
+- 后端 DeepSeek 处理改为最新输入优先，避免多轮输入被上一轮阻塞。
 - MiMo ASR 保留为分段兜底，不伪装成真正流式 ASR。
 - 阿里云 TTS 优先输出真实 mp3；超时时前端使用浏览器 `speechSynthesis` 兜底播报。
 

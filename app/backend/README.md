@@ -1,61 +1,88 @@
-# AI 面试官语音后端 Mock Demo
+# AI Interviewer Voice Backend
 
-这是一个用于前端联调的 FastAPI 后端 Mock 服务，模拟 AI 面试官语音链路：
+FastAPI 后端，负责语音会话、WebSocket 事件、ASR/LLM/TTS provider 调度。
 
-候选人音频事件 -> mock STT partial/final -> mock LLM 面试官回复 -> mock TTS 音频状态 -> turn 指标。
-
-当前实现不接入真实 Azure、腾讯云、阿里云或 OpenAI 服务，也不需要真实 API Key。
-
-## 启动方式
+## 运行
 
 ```powershell
 cd app/backend
-python -m venv .venv
-. .venv/Scripts/Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8011
 ```
 
-## 创建面试会话
+## 核心接口
 
 ```http
-POST http://127.0.0.1:8000/api/interview-sessions
-Content-Type: application/json
+GET /health
+GET /api/provider-status
+POST /api/interview-sessions
+WS /ws/voice/session?session_id=<session_id>
 ```
 
-请求示例：
+创建会话示例：
 
 ```json
 {
-  "candidate_id": "candidate_demo",
-  "job_id": "backend_engineer",
+  "candidate_id": "demo_candidate",
+  "job_id": "ai_interviewer_demo",
   "language": "zh-CN",
-  "stt_provider": "mock",
-  "tts_provider": "mock",
+  "stt_provider": "aliyun",
+  "llm_provider": "deepseek",
+  "tts_provider": "aliyun",
   "voice_profile": "professional_warm_female"
 }
 ```
 
-响应会返回 `session_id` 和 `websocket_url`。
+## WebSocket 事件
 
-## WebSocket
+客户端到服务端：
 
-连接：
+- `audio.chunk`：16k PCM 音频分片，用于后端实时 ASR 或分段 ASR。
+- `audio.stop`：结束当前音频段。
+- `speech.final`：前端已经拿到稳定候选人文本，直接进入 LLM 链路。
+- `control.interrupt`：用户打断 AI 播放。
 
-```text
-ws://127.0.0.1:8000/ws/voice/session?session_id=<session_id>
-```
+服务端到客户端：
 
-客户端可发送事件：
+- `session.ready`
+- `asr.starting`
+- `asr.ready`
+- `asr.fallback`
+- `audio.received`
+- `stt.partial`
+- `stt.final`
+- `llm.input`
+- `assistant.text`
+- `tts.audio`
+- `metrics.turn`
+- `control.interrupted`
+- `error`
 
-- `audio.chunk`：模拟音频分片，服务端会返回 `stt.partial`。
-- `demo.answer_start`：模拟候选人开始回答。
-- `demo.answer_complete`：模拟候选人回答结束，服务端会返回 `stt.final`，然后触发 mock LLM 和 mock TTS。
-- `control.interrupt`：模拟候选人打断，会取消或标记当前 TTS 播放。
+关键规则：
 
-重要规则：
+- `partial` 只展示，不进入 LLM。
+- `final` 才进入 DeepSeek。
+- 多轮输入采用最新 final 优先，上一轮未完成 LLM 任务会被取消。
+- 系统状态文本不会作为候选人回答进入 LLM。
 
-- `stt.partial` 只用于前端字幕展示，不进入 LLM。
-- 只有 `stt.final` 会触发 orchestrator。
-- `control.interrupt` 会取消当前 TTS 任务，并返回打断确认与指标。
+## Provider
 
+LLM：
+
+- `deepseek`
+- 配置：`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`
+
+ASR：
+
+- `aliyun`：实时 ASR 主链路，目标返回 `stt.partial` / `stt.final`
+- `mimo`：分段 ASR 备份，`supports_partial=false`
+
+TTS：
+
+- `aliyun`：阿里云 REST TTS 返回 mp3
+- 前端浏览器 TTS 会作为兜底，保证本地 demo 能听到回复
+
+## 注意
+
+`.env` 只放本地真实密钥，不提交。`.env.example` 只维护变量名和默认 endpoint。
